@@ -21,10 +21,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all --check
+      # Scoped to gapura-core on purpose: the shell needs GTK/WebKit system
+      # libraries, which the dedicated `app` job installs.
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy -p gapura-core --all-targets -- -D warnings
       - name: Tests
-        run: cargo test --all-targets
+        run: cargo test -p gapura-core --all-targets
 
   sshd-integration:
     name: Core against real sshd
@@ -93,8 +95,10 @@ jobs:
   audit:
     name: Dependency audit
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: taiki-e/install-action@cargo-deny
+      - name: cargo deny (advisories, licenses, sources)
+        run: cargo deny check
