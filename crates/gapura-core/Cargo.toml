@@ -19,9 +19,10 @@ argon2 = "0.6"
 base64 = "0.22"
 dirs = "6"
 keyring = "4"
-rand = "0.9"
-rand_core = "0.9"
+rand_core = { version = "0.6", features = ["getrandom"] }
 zeroize = "1"
+
+ssh-key = { version = "0.6", features = ["ed25519", "rand_core", "getrandom", "encryption"] }
 
 [dev-dependencies]
 tempfile = "3"
