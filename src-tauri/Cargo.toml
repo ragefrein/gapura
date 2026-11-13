@@ -31,6 +31,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 uuid.workspace = true
 
+[dev-dependencies]
+tempfile = "3"
+tauri = { version = "2", features = ["test"] }
+
 [features]
 # This feature exists so `cargo tauri build` embeds assets in release mode.
 custom-protocol = ["tauri/custom-protocol"]
