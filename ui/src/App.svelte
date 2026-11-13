@@ -1,20 +1,37 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { SquareTerminal } from "@lucide/svelte";
-  import { api, isIpcError, type Connection } from "./ipc";
+  import { api, isIpcError, listen, type Connection } from "./ipc";
   import {
+    activeSessionId,
     activeView,
     connections,
     groups,
+    markSessionState,
     pushToast,
+    sessions,
     settings,
     vaultStatus,
+    type SessionTab,
   } from "./stores";
+  import { writeToTerminal } from "./terminalBus";
   import Sidebar from "./components/Sidebar.svelte";
   import ConnectionForm from "./components/ConnectionForm.svelte";
   import CommandPalette from "./components/CommandPalette.svelte";
   import ConfirmDialog from "./components/ConfirmDialog.svelte";
+  import SessionTabs from "./components/SessionTabs.svelte";
+  import TerminalView from "./components/TerminalView.svelte";
+  import HostKeyModal from "./components/HostKeyModal.svelte";
   import Toasts from "./components/Toasts.svelte";
+
+  interface HostKeyMismatch {
+    host: string;
+    port: number;
+    storedFingerprint: string;
+    actualFingerprint: string;
+    /** Connection the user was trying to reach; retried after the update. */
+    connectionId: string;
+  }
 
   let paletteOpen = $state(false);
   let formTarget = $state<{ open: boolean; connection: Connection | null }>({
@@ -22,9 +39,16 @@
     connection: null,
   });
   let confirmDelete = $state<Connection | null>(null);
+  let hostKeyMismatch = $state<HostKeyMismatch | null>(null);
 
   function applyTheme(theme: "dark" | "light") {
     document.documentElement.dataset.theme = theme;
+  }
+
+  function describe(error: unknown): string {
+    if (isIpcError(error)) return error.message;
+    if (error instanceof Error) return error.message;
+    return String(error);
   }
 
   async function refreshConnections() {
@@ -36,11 +60,93 @@
     }
   }
 
-  function describe(error: unknown): string {
-    if (isIpcError(error)) return error.message;
-    if (error instanceof Error) return error.message;
-    return String(error);
+  // ---- session lifecycle ---------------------------------------------------
+
+  async function connect(connection: Connection) {
+    // Already live? Focus the tab instead of opening a second session.
+    const existing = $sessions.find(
+      (s) => s.connectionId === connection.id && s.state !== "closed",
+    );
+    if (existing) {
+      activeSessionId.set(existing.id);
+      activeView.set("terminal");
+      return;
+    }
+    activeView.set("terminal");
+    try {
+      const info = await api.sessionOpen(connection.id, 80, 24);
+      const tab: SessionTab = {
+        id: info.id,
+        connectionId: connection.id,
+        name: connection.name,
+        color: connection.color,
+        state: "connected",
+      };
+      sessions.update((list) => [...list, tab]);
+      activeSessionId.set(info.id);
+      if (info.new_host_key) {
+        pushToast(
+          "info",
+          `Host key pinned for ${connection.host} (${info.fingerprint.slice(0, 17)}...)`,
+        );
+      }
+    } catch (e) {
+      if (isIpcError(e) && e.code === "ssh.host_key_mismatch") {
+        hostKeyMismatch = {
+          host: e.host ?? connection.host,
+          port: e.port ?? connection.port,
+          storedFingerprint: e.stored_fingerprint ?? "",
+          actualFingerprint: e.actual_fingerprint ?? "",
+          connectionId: connection.id,
+        };
+        return;
+      }
+      pushToast("error", describe(e));
+    }
   }
+
+  async function reconnect(sessionId: string) {
+    const session = $sessions.find((s) => s.id === sessionId);
+    if (!session) return;
+    try {
+      markSessionState(sessionId, "connecting");
+      const info = await api.sessionReconnect(sessionId, 80, 24);
+      markSessionState(info.id, "connected");
+      pushToast("info", `Reconnected to ${session.name}`);
+    } catch (e) {
+      markSessionState(sessionId, "closed", describe(e));
+      pushToast("error", describe(e));
+    }
+  }
+
+  async function closeSession(sessionId: string) {
+    try {
+      await api.sessionClose(sessionId);
+    } catch {
+      // The session may already be gone on the backend; drop the tab anyway.
+    }
+    sessions.update((list) => list.filter((s) => s.id !== sessionId));
+    activeSessionId.update((id) =>
+      id === sessionId
+        ? ($sessions[$sessions.length - 1]?.id ?? null)
+        : id,
+    );
+  }
+
+  async function acceptNewHostKey() {
+    const mismatch = hostKeyMismatch;
+    if (!mismatch) return;
+    hostKeyMismatch = null;
+    try {
+      await api.removeKnownHost(`${mismatch.host}:${mismatch.port}`);
+      const connection = $connections.find((c) => c.id === mismatch.connectionId);
+      if (connection) await connect(connection);
+    } catch (e) {
+      pushToast("error", describe(e));
+    }
+  }
+
+  // ---- misc actions --------------------------------------------------------
 
   async function saveFromForm(saved: Connection) {
     formTarget = { open: false, connection: null };
@@ -53,6 +159,11 @@
     if (!target) return;
     confirmDelete = null;
     try {
+      for (const session of $sessions.filter(
+        (s) => s.connectionId === target.id && s.state !== "closed",
+      )) {
+        await closeSession(session.id);
+      }
       await api.deleteConnection(target.id);
       await refreshConnections();
       pushToast("info", `Deleted "${target.name}"`);
@@ -81,11 +192,41 @@
       if ($vaultStatus.unlocked) await refreshConnections();
     })();
 
-    // Cross-component actions (palette, future views).
+    // Terminal output and status events from the Rust side.
+    const unlisteners: Array<() => void> = [];
+
+    void listen<{ id: string; data: string }>("session:data", (event) => {
+      const bytes = Uint8Array.from(atob(event.payload.data), (ch) =>
+        ch.charCodeAt(0),
+      );
+      writeToTerminal(event.payload.id, bytes);
+    }).then((off) => unlisteners.push(off));
+
+    void listen<{
+      id: string;
+      state: "connected" | { closed: string };
+    }>("session:status", (event) => {
+      const state = event.payload.state;
+      if (state === "connected") {
+        markSessionState(event.payload.id, "connected");
+      } else {
+        markSessionState(event.payload.id, "closed", state.closed);
+        pushToast("info", `Session closed: ${state.closed}`);
+      }
+    }).then((off) => unlisteners.push(off));
+
+    void listen<{ host: string; fingerprint: string }>("hostkey:added", (event) => {
+      pushToast("info", `Host key pinned for ${event.payload.host}`);
+    }).then((off) => unlisteners.push(off));
+
+    // Cross-component actions.
     const onNew = () => (formTarget = { open: true, connection: null });
     const onToggleTheme = () => toggleTheme();
+    const onCloseSession = (event: Event) =>
+      void closeSession((event as CustomEvent<string>).detail);
     window.addEventListener("gapura:new-connection", onNew);
     window.addEventListener("gapura:toggle-theme", onToggleTheme);
+    window.addEventListener("gapura:close-session", onCloseSession);
 
     const globalKeys = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
@@ -96,8 +237,10 @@
     window.addEventListener("keydown", globalKeys);
 
     return () => {
+      for (const off of unlisteners.splice(0)) off();
       window.removeEventListener("gapura:new-connection", onNew);
       window.removeEventListener("gapura:toggle-theme", onToggleTheme);
+      window.removeEventListener("gapura:close-session", onCloseSession);
       window.removeEventListener("keydown", globalKeys);
     };
   });
@@ -105,10 +248,9 @@
 
 <div class="app">
   <Sidebar
-    search={""}
     onConnect={(connection) => {
-      // Sessions land with the terminal work; editing stays available.
-      formTarget = { open: true, connection };
+      activeView.set("terminal");
+      void connect(connection);
     }}
     onEdit={(connection) => (formTarget = { open: true, connection })}
     onDelete={(connection) => (confirmDelete = connection)}
@@ -120,23 +262,39 @@
   />
 
   <main>
+    <SessionTabs />
     {#if $activeView === "terminal"}
-      <div class="empty-state">
-        <SquareTerminal size={40} strokeWidth={1.4} />
-        <p>Select a connection to start a session.</p>
-        <p class="hint">Press <span class="kbd">Ctrl K</span> to search everything.</p>
-      </div>
+      {#if $sessions.length > 0}
+        <div class="term-stack">
+          {#each $sessions as session (session.id)}
+            <TerminalView
+              {session}
+              settings={$settings}
+              appTheme={$settings.theme}
+              active={session.id === $activeSessionId}
+              onReconnect={() => void reconnect(session.id)}
+              onCloseTab={() => void closeSession(session.id)}
+            />
+          {/each}
+        </div>
+      {:else}
+        <div class="empty-state">
+          <SquareTerminal size={40} strokeWidth={1.4} />
+          <p>Select a connection to start a session.</p>
+          <p class="hint">Press <span class="kbd">Ctrl K</span> to search everything.</p>
+        </div>
+      {/if}
+    {:else if $activeView === "keys"}
+      <div class="empty-state"><p>Key management arrives with the next update.</p></div>
     {:else}
-      <div class="empty-state">
-        <p>This screen arrives with the next update.</p>
-      </div>
+      <div class="empty-state"><p>Settings arrive with the next update.</p></div>
     {/if}
   </main>
 </div>
 
 {#if paletteOpen}
   <CommandPalette
-    onConnect={(connection) => (formTarget = { open: true, connection })}
+    onConnect={(connection) => void connect(connection)}
     onClose={() => (paletteOpen = false)}
   />
 {/if}
@@ -158,6 +316,17 @@
   />
 {/if}
 
+{#if hostKeyMismatch}
+  <HostKeyModal
+    host={hostKeyMismatch.host}
+    port={hostKeyMismatch.port}
+    storedFingerprint={hostKeyMismatch.storedFingerprint}
+    actualFingerprint={hostKeyMismatch.actualFingerprint}
+    onUpdate={acceptNewHostKey}
+    onCancel={() => (hostKeyMismatch = null)}
+  />
+{/if}
+
 <Toasts />
 
 <style>
@@ -172,6 +341,13 @@
     flex-direction: column;
     min-width: 0;
     background: var(--bg);
+  }
+
+  .term-stack {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
   }
 
   .empty-state {

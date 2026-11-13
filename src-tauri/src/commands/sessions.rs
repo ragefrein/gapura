@@ -10,7 +10,7 @@ use gapura_core::ssh::session::{
 };
 use gapura_core::GapuraError;
 use serde::Serialize;
-use tauri::Emitter;
+use tauri::{AppHandle, Emitter, Runtime, State};
 use uuid::Uuid;
 
 use crate::error::CommandResult;
@@ -74,9 +74,9 @@ pub fn list_sessions(state: tauri::State<'_, AppState>) -> CommandResult<Vec<Ses
 /// Open a session for a connection. The heavy lifting runs on the async
 /// runtime; the actor emits `session:data` / `session:status` events.
 #[tauri::command]
-pub async fn session_open(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
+pub async fn session_open<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
     connection_id: Uuid,
     cols: u32,
     rows: u32,
@@ -87,9 +87,9 @@ pub async fn session_open(
 /// Reconnect an existing session (reconnect banner): same session id, fresh
 /// connection. The terminal keeps its scrollback on the UI side.
 #[tauri::command]
-pub async fn session_reconnect(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
+pub async fn session_reconnect<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
     session_id: Uuid,
     cols: u32,
     rows: u32,
@@ -108,35 +108,39 @@ pub async fn session_reconnect(
 }
 
 #[tauri::command]
-pub fn session_write(
-    state: tauri::State<'_, AppState>,
+pub async fn session_write(
+    state: State<'_, AppState>,
     session_id: Uuid,
     data: String,
 ) -> CommandResult<()> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data.as_bytes())
         .map_err(|e| GapuraError::Other(format!("terminal payload is not valid base64: {e}")))?;
-    send_command(&state, &session_id, SessionCommand::Write(bytes))
+    send_command(&state, &session_id, SessionCommand::Write(bytes)).await
 }
 
 #[tauri::command]
-pub fn session_resize(
-    state: tauri::State<'_, AppState>,
+pub async fn session_resize(
+    state: State<'_, AppState>,
     session_id: Uuid,
     cols: u32,
     rows: u32,
 ) -> CommandResult<()> {
-    send_command(&state, &session_id, SessionCommand::Resize(cols, rows))
+    send_command(&state, &session_id, SessionCommand::Resize(cols, rows)).await
 }
 
 #[tauri::command]
-pub fn session_close(state: tauri::State<'_, AppState>, session_id: Uuid) -> CommandResult<()> {
-    send_command(&state, &session_id, SessionCommand::Close)?;
+pub async fn session_close(state: State<'_, AppState>, session_id: Uuid) -> CommandResult<()> {
+    send_command(&state, &session_id, SessionCommand::Close).await?;
     let _ = state.take_session(&session_id);
     Ok(())
 }
 
-fn send_command(state: &AppState, session_id: &Uuid, command: SessionCommand) -> CommandResult<()> {
+async fn send_command(
+    state: &AppState,
+    session_id: &Uuid,
+    command: SessionCommand,
+) -> CommandResult<()> {
     let sender = {
         let sessions = state
             .sessions
@@ -148,14 +152,15 @@ fn send_command(state: &AppState, session_id: &Uuid, command: SessionCommand) ->
             .ok_or_else(|| GapuraError::Other("session not found".into()))?
     };
     sender
-        .blocking_send(command)
+        .send(command)
+        .await
         .map_err(|_| GapuraError::Other("session is gone".into()))
 }
 
 /// Shared flow for open and reconnect.
-async fn open_and_register(
-    app: &tauri::AppHandle,
-    state: &tauri::State<'_, AppState>,
+async fn open_and_register<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &State<'_, AppState>,
     connection_id: Uuid,
     reuse_session_id: Option<Uuid>,
     cols: u32,
@@ -242,7 +247,7 @@ fn resolve_auth(
     })
 }
 
-fn event_sink(app: tauri::AppHandle, session_id: Uuid) -> EventSink {
+fn event_sink<R: Runtime>(app: AppHandle<R>, session_id: Uuid) -> EventSink {
     Arc::new(move |event: SessionEvent| match event {
         SessionEvent::Data(bytes) => {
             let payload = base64::engine::general_purpose::STANDARD.encode(&bytes);

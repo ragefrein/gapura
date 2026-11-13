@@ -1,9 +1,10 @@
 //! Gapura desktop app. This crate is an IPC bridge: every real decision
 //! lives in gapura-core.
 
-mod commands;
-mod error;
-mod state;
+// Public for integration tests; the webview is the only production consumer.
+pub mod commands;
+pub mod error;
+pub mod state;
 
 use gapura_core::paths;
 use state::AppState;

@@ -23,7 +23,6 @@
     onImport,
     onLock,
   }: {
-    search: string;
     onConnect: (connection: Connection) => void;
     onEdit: (connection: Connection) => void;
     onDelete: (connection: Connection) => void;
