@@ -1,0 +1,52 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!--
+    Gapura app icon.
+
+    The mark is a candi bentar — the split gateway of Indonesian temples,
+    which the app is named after: two stepped pillars forming a gate you
+    pass through. Geometry is kept simple so it stays crisp from 16 px to
+    1024 px. Regenerate all platform sizes with:
+      node tools/genicon.mjs then run: npx (in ui/) tauri icon src-tauri/icons/icon.png
+  -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#101820"/>
+      <stop offset="1" stop-color="#0a0f14"/>
+    </linearGradient>
+    <linearGradient id="pillar" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2dd4bf"/>
+      <stop offset="1" stop-color="#0d9488"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="1024" height="1024" rx="224" fill="url(#bg)"/>
+  <rect x="0" y="0" width="1024" height="1024" rx="224" fill="none" stroke="#134e4a" stroke-width="10"/>
+
+  <!-- left pillar -->
+  <path d="M 236 828
+           L 236 396
+           L 286 348
+           L 286 300
+           L 336 252
+           L 386 300
+           L 386 348
+           L 436 396
+           L 436 828 Z"
+        fill="url(#pillar)"/>
+  <!-- right pillar (mirror) -->
+  <path d="M 788 828
+           L 788 396
+           L 738 348
+           L 738 300
+           L 688 252
+           L 638 300
+           L 638 348
+           L 588 396
+           L 588 828 Z"
+        fill="url(#pillar)"/>
+
+  <!-- base line -->
+  <rect x="196" y="828" width="632" height="44" rx="22" fill="#2dd4bf" opacity="0.9"/>
+
+  <!-- soft glow inside the gate -->
+  <rect x="456" y="330" width="112" height="498" rx="56" fill="#134e4a" opacity="0.55"/>
+</svg>
