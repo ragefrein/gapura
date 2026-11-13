@@ -108,6 +108,79 @@ impl GapuraError {
 
 pub type Result<T, E = GapuraError> = std::result::Result<T, E>;
 
+// ---- IPC serialization ----------------------------------------------------
+//
+// Errors cross the webview boundary as `{code, message, ...context}`. The
+// impl lives here because the orphan rule requires it in the owning crate.
+// Host-key mismatches carry their fingerprints so the UI can render the
+// TOFU dialog without a second round-trip.
+
+impl GapuraError {
+    /// Host context attached to ssh dial errors, if any.
+    fn host_context(&self) -> Option<(&String, u16)> {
+        match self {
+            GapuraError::HostKeyMismatch { host, port, .. } => Some((host, *port)),
+            GapuraError::ConnectFailed { host, port, .. } => Some((host, *port)),
+            _ => None,
+        }
+    }
+}
+
+impl serde::Serialize for GapuraError {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("GapuraError", 2)?;
+        state.serialize_field("code", self.code())?;
+        state.serialize_field("message", &self.to_string())?;
+        if let Some((host, port)) = self.host_context() {
+            state.serialize_field("host", host)?;
+            state.serialize_field("port", &port)?;
+        }
+        if let GapuraError::HostKeyMismatch { stored, actual, .. } = self {
+            state.serialize_field("stored_fingerprint", stored)?;
+            state.serialize_field("actual_fingerprint", actual)?;
+        }
+        state.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for GapuraError {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Shape {
+            code: String,
+            message: String,
+            #[serde(default)]
+            host: Option<String>,
+            #[serde(default)]
+            port: Option<u16>,
+            #[serde(default)]
+            stored_fingerprint: Option<String>,
+            #[serde(default)]
+            actual_fingerprint: Option<String>,
+        }
+        let shape = Shape::deserialize(deserializer)?;
+        Ok(match shape.code.as_str() {
+            "vault.not_found" => GapuraError::VaultNotFound,
+            "vault.locked" => GapuraError::VaultLocked,
+            "vault.wrong_passphrase" => GapuraError::WrongPassphrase,
+            "vault.keychain" => GapuraError::Keychain(shape.message),
+            "ssh.host_key_mismatch" => GapuraError::HostKeyMismatch {
+                host: shape.host.unwrap_or_default(),
+                port: shape.port.unwrap_or(22),
+                stored: shape.stored_fingerprint.unwrap_or_default(),
+                actual: shape.actual_fingerprint.unwrap_or_default(),
+            },
+            _ => GapuraError::Other(shape.message),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/gapura-core"]
+members = ["crates/gapura-core", "src-tauri"]
 
 [workspace.package]
 version = "0.1.0"
@@ -15,6 +15,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 tracing = "0.1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "net", "time", "io-util"] }
 
 [profile.release]
 lto = "thin"

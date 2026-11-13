@@ -21,7 +21,6 @@
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use argon2::{Algorithm, Argon2, Params, Version};
-use rand_core::TryRngCore;
 use zeroize::Zeroizing;
 
 use crate::error::{GapuraError, Result};
@@ -161,13 +160,10 @@ impl VaultHeader {
     }
 }
 
-/// Fill a buffer straight from the OS entropy source. We use the fallible
-/// API on purpose: an entropy failure must be surfaced, not silently
-/// downgraded to a weak random source.
+/// Fill a buffer straight from the OS entropy source. The fallible API is
+/// used on purpose: entropy failure must surface, not silently degrade.
 fn os_fill(buf: &mut [u8]) -> Result<()> {
-    rand::rngs::OsRng
-        .try_fill_bytes(buf)
-        .map_err(|e| GapuraError::Crypto(format!("os entropy source failed: {e}")))
+    getrandom::fill(buf).map_err(|e| GapuraError::Crypto(format!("os entropy source failed: {e}")))
 }
 
 pub fn random_nonce() -> Result<[u8; NONCE_LEN]> {
