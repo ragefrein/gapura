@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { SquareTerminal } from "@lucide/svelte";
-  import { api, isIpcError, listen, type Connection } from "./ipc";
+  import { api, isIpcError, listen, type Connection, type Theme } from "./ipc";
   import {
     activeSessionId,
     activeView,
@@ -22,6 +22,11 @@
   import SessionTabs from "./components/SessionTabs.svelte";
   import TerminalView from "./components/TerminalView.svelte";
   import HostKeyModal from "./components/HostKeyModal.svelte";
+  import Onboarding from "./components/Onboarding.svelte";
+  import UnlockScreen from "./components/UnlockScreen.svelte";
+  import SettingsView from "./components/SettingsView.svelte";
+  import KeysView from "./components/KeysView.svelte";
+  import ImportReview from "./components/ImportReview.svelte";
   import Toasts from "./components/Toasts.svelte";
 
   interface HostKeyMismatch {
@@ -29,7 +34,6 @@
     port: number;
     storedFingerprint: string;
     actualFingerprint: string;
-    /** Connection the user was trying to reach; retried after the update. */
     connectionId: string;
   }
 
@@ -40,8 +44,18 @@
   });
   let confirmDelete = $state<Connection | null>(null);
   let hostKeyMismatch = $state<HostKeyMismatch | null>(null);
+  let importOpen = $state(false);
+  let bootstrapped = $state(false);
 
-  function applyTheme(theme: "dark" | "light") {
+  /** Full-screen states: first-run wizard and the locked vault. */
+  let stage = $derived.by(() => {
+    if (!bootstrapped) return "boot";
+    if (!$vaultStatus.exists) return "onboarding";
+    if (!$vaultStatus.unlocked) return "locked";
+    return "main";
+  });
+
+  function applyTheme(theme: Theme) {
     document.documentElement.dataset.theme = theme;
   }
 
@@ -60,10 +74,14 @@
     }
   }
 
+  async function enterMain() {
+    vaultStatus.set(await api.vaultStatus());
+    if ($vaultStatus.unlocked) await refreshConnections();
+  }
+
   // ---- session lifecycle ---------------------------------------------------
 
   async function connect(connection: Connection) {
-    // Already live? Focus the tab instead of opening a second session.
     const existing = $sessions.find(
       (s) => s.connectionId === connection.id && s.state !== "closed",
     );
@@ -123,14 +141,13 @@
     try {
       await api.sessionClose(sessionId);
     } catch {
-      // The session may already be gone on the backend; drop the tab anyway.
+      // Already gone on the backend; drop the tab regardless.
     }
     sessions.update((list) => list.filter((s) => s.id !== sessionId));
-    activeSessionId.update((id) =>
-      id === sessionId
-        ? ($sessions[$sessions.length - 1]?.id ?? null)
-        : id,
-    );
+    const remaining = $sessions.filter((s) => s.id !== sessionId);
+    if ($activeSessionId === sessionId) {
+      activeSessionId.set(remaining[remaining.length - 1]?.id ?? null);
+    }
   }
 
   async function acceptNewHostKey() {
@@ -172,14 +189,61 @@
     }
   }
 
+  function setTheme(theme: Theme, persist: boolean) {
+    settings.update((s) => ({ ...s, theme }));
+    applyTheme(theme);
+    if (persist) void api.saveSettings($settings);
+  }
+
   function toggleTheme() {
-    const next = $settings.theme === "dark" ? "light" : "dark";
-    settings.update((s) => ({ ...s, theme: next }));
-    applyTheme(next);
-    void api.saveSettings($settings);
+    setTheme($settings.theme === "dark" ? "light" : "dark", true);
   }
 
   onMount(() => {
+    const unlisteners: Array<() => void> = [];
+
+    void listen<{ id: string; data: string }>("session:data", (event) => {
+      const bytes = Uint8Array.from(atob(event.payload.data), (ch) => ch.charCodeAt(0));
+      writeToTerminal(event.payload.id, bytes);
+    }).then((off) => unlisteners.push(off));
+
+    void listen<{ id: string; state: "connected" | { closed: string } }>(
+      "session:status",
+      (event) => {
+        const state = event.payload.state;
+        if (state === "connected") {
+          markSessionState(event.payload.id, "connected");
+        } else {
+          markSessionState(event.payload.id, "closed", state.closed);
+          pushToast("info", `Session closed: ${state.closed}`);
+        }
+      },
+    ).then((off) => unlisteners.push(off));
+
+    void listen<{ host: string; fingerprint: string }>("hostkey:added", (event) => {
+      pushToast("info", `Host key pinned for ${event.payload.host}`);
+    }).then((off) => unlisteners.push(off));
+
+    const onNew = () => (formTarget = { open: true, connection: null });
+    const onToggleTheme = () => toggleTheme();
+    const onCloseSession = (event: Event) =>
+      void closeSession((event as CustomEvent<string>).detail);
+    const onUnlocked = () => void enterMain();
+    const onOnboarded = () => void enterMain();
+    window.addEventListener("gapura:new-connection", onNew);
+    window.addEventListener("gapura:toggle-theme", onToggleTheme);
+    window.addEventListener("gapura:close-session", onCloseSession);
+    window.addEventListener("gapura:unlocked", onUnlocked);
+    window.addEventListener("gapura:onboarded", onOnboarded);
+
+    const globalKeys = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        if (stage === "main") paletteOpen = !paletteOpen;
+      }
+    };
+    window.addEventListener("keydown", globalKeys);
+
     void (async () => {
       try {
         const loaded = await api.getSettings();
@@ -189,108 +253,91 @@
         applyTheme("dark");
       }
       vaultStatus.set(await api.vaultStatus());
+
+      // Keychain mode unlocks silently (design doc 2.3: no passphrase per
+      // launch); passphrase mode waits for the unlock screen.
+      if ($vaultStatus.exists && $vaultStatus.mode === "keychain" && !$vaultStatus.unlocked) {
+        try {
+          await api.vaultUnlock();
+          vaultStatus.set(await api.vaultStatus());
+        } catch (e) {
+          if (isIpcError(e) && e.code === "vault.keychain") {
+            vaultStatus.update((v) => ({ ...v, keychain_error: e.message }));
+          }
+        }
+      }
       if ($vaultStatus.unlocked) await refreshConnections();
-    })();
-
-    // Terminal output and status events from the Rust side.
-    const unlisteners: Array<() => void> = [];
-
-    void listen<{ id: string; data: string }>("session:data", (event) => {
-      const bytes = Uint8Array.from(atob(event.payload.data), (ch) =>
-        ch.charCodeAt(0),
-      );
-      writeToTerminal(event.payload.id, bytes);
-    }).then((off) => unlisteners.push(off));
-
-    void listen<{
-      id: string;
-      state: "connected" | { closed: string };
-    }>("session:status", (event) => {
-      const state = event.payload.state;
-      if (state === "connected") {
-        markSessionState(event.payload.id, "connected");
-      } else {
-        markSessionState(event.payload.id, "closed", state.closed);
-        pushToast("info", `Session closed: ${state.closed}`);
-      }
-    }).then((off) => unlisteners.push(off));
-
-    void listen<{ host: string; fingerprint: string }>("hostkey:added", (event) => {
-      pushToast("info", `Host key pinned for ${event.payload.host}`);
-    }).then((off) => unlisteners.push(off));
-
-    // Cross-component actions.
-    const onNew = () => (formTarget = { open: true, connection: null });
-    const onToggleTheme = () => toggleTheme();
-    const onCloseSession = (event: Event) =>
-      void closeSession((event as CustomEvent<string>).detail);
-    window.addEventListener("gapura:new-connection", onNew);
-    window.addEventListener("gapura:toggle-theme", onToggleTheme);
-    window.addEventListener("gapura:close-session", onCloseSession);
-
-    const globalKeys = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
-        event.preventDefault();
-        paletteOpen = !paletteOpen;
-      }
-    };
-    window.addEventListener("keydown", globalKeys);
+    })().finally(() => {
+      // Never wedge on the boot screen; a failed status check still shows
+      // the onboarding path instead of a blank window.
+      bootstrapped = true;
+    });
 
     return () => {
       for (const off of unlisteners.splice(0)) off();
       window.removeEventListener("gapura:new-connection", onNew);
       window.removeEventListener("gapura:toggle-theme", onToggleTheme);
       window.removeEventListener("gapura:close-session", onCloseSession);
+      window.removeEventListener("gapura:unlocked", onUnlocked);
+      window.removeEventListener("gapura:onboarded", onOnboarded);
       window.removeEventListener("keydown", globalKeys);
     };
   });
 </script>
 
-<div class="app">
-  <Sidebar
-    onConnect={(connection) => {
-      activeView.set("terminal");
-      void connect(connection);
-    }}
-    onEdit={(connection) => (formTarget = { open: true, connection })}
-    onDelete={(connection) => (confirmDelete = connection)}
-    onNewConnection={() => (formTarget = { open: true, connection: null })}
-    onImport={() => pushToast("info", "Import lands with the onboarding update")}
-    onLock={() => {
-      void api.vaultLock().then(() => window.location.reload());
-    }}
-  />
+{#if stage === "boot"}
+  <div class="boot"></div>
+{:else if stage === "onboarding"}
+  <Onboarding />
+{:else if stage === "locked"}
+  <UnlockScreen />
+{:else}
+  <div class="app">
+    <Sidebar
+      onConnect={(connection) => {
+        activeView.set("terminal");
+        void connect(connection);
+      }}
+      onEdit={(connection) => (formTarget = { open: true, connection })}
+      onDelete={(connection) => (confirmDelete = connection)}
+      onNewConnection={() => (formTarget = { open: true, connection: null })}
+      onImport={() => (importOpen = true)}
+      onLock={() => {
+        void api.vaultLock().then(() => window.location.reload());
+      }}
+    />
 
-  <main>
-    <SessionTabs />
-    {#if $activeView === "terminal"}
-      {#if $sessions.length > 0}
-        <div class="term-stack">
-          {#each $sessions as session (session.id)}
-            <TerminalView
-              {session}
-              settings={$settings}
-              appTheme={$settings.theme}
-              active={session.id === $activeSessionId}
-              onReconnect={() => void reconnect(session.id)}
-              onCloseTab={() => void closeSession(session.id)}
-            />
-          {/each}
-        </div>
+    <main>
+      <SessionTabs />
+      {#if $activeView === "terminal"}
+        {#if $sessions.length > 0}
+          <div class="term-stack">
+            {#each $sessions as session (session.id)}
+              <TerminalView
+                {session}
+                settings={$settings}
+                appTheme={$settings.theme}
+                active={session.id === $activeSessionId}
+                onReconnect={() => void reconnect(session.id)}
+                onCloseTab={() => void closeSession(session.id)}
+              />
+            {/each}
+          </div>
+        {:else}
+          <div class="empty-state">
+            <SquareTerminal size={40} strokeWidth={1.4} />
+            <p>Select a connection to start a session.</p>
+            <p class="hint">Press <span class="kbd">Ctrl K</span> to search everything.</p>
+          </div>
+        {/if}
+      {:else if $activeView === "keys"}
+        <KeysView />
       {:else}
-        <div class="empty-state">
-          <SquareTerminal size={40} strokeWidth={1.4} />
-          <p>Select a connection to start a session.</p>
-          <p class="hint">Press <span class="kbd">Ctrl K</span> to search everything.</p>
-        </div>
+        <SettingsView />
       {/if}
-    {:else if $activeView === "keys"}
-      <div class="empty-state"><p>Key management arrives with the next update.</p></div>
-    {:else}
-      <div class="empty-state"><p>Settings arrive with the next update.</p></div>
-    {/if}
-  </main>
-</div>
+    </main>
+  </div>
+{/if}
 
 {#if paletteOpen}
   <CommandPalette
@@ -327,9 +374,24 @@
   />
 {/if}
 
+{#if importOpen}
+  <ImportReview
+    onClose={() => (importOpen = false)}
+    onImported={() => {
+      importOpen = false;
+      void refreshConnections();
+    }}
+  />
+{/if}
+
 <Toasts />
 
 <style>
+  .boot {
+    height: 100vh;
+    background: var(--bg);
+  }
+
   .app {
     display: flex;
     height: 100vh;
