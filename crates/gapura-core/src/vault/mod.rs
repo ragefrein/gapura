@@ -100,7 +100,7 @@ impl UnlockedVault {
     /// rename) and rotates backups of previous versions.
     pub fn save(&self) -> Result<()> {
         let plaintext = serde_json::to_vec(&self.payload)?;
-        let nonce = crypto::random_nonce().unwrap();
+        let nonce = crypto::random_nonce()?;
         let header = match self.mode {
             VaultMode::Keychain => VaultHeader::keychain(nonce),
             VaultMode::Passphrase => VaultHeader::argon2id(

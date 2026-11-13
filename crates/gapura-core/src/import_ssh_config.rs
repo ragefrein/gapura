@@ -28,8 +28,9 @@ struct ParsedBlock {
     is_pattern: bool,
 }
 
-/// One proposed connection produced by [`parse_ssh_config`].
-#[derive(Debug, Clone, PartialEq)]
+/// One proposed connection produced by [`parse_ssh_config`]. Serialized so
+/// the review UI can send accepted candidates back verbatim.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ImportCandidate {
     pub name: String,
     pub host: String,

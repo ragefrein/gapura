@@ -7,7 +7,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use rand_core::CryptoRngCore;
+use rand_core::{CryptoRng, UnwrapErr};
 use ssh_key::{Algorithm, HashAlg, LineEnding, PrivateKey};
 
 use crate::error::{GapuraError, Result};
@@ -22,8 +22,11 @@ pub struct KeyFileInfo {
     pub has_passphrase: bool,
 }
 
-fn os_rng() -> impl CryptoRngCore {
-    rand_core::OsRng
+fn os_rng() -> impl CryptoRng {
+    // UnwrapErr turns the fallible OS entropy source into the infallible
+    // view `PrivateKey::random` wants; a failing entropy source is a hard
+    // stop, which the panic inside UnwrapErr makes explicit.
+    UnwrapErr(getrandom::SysRng)
 }
 
 /// Generate a new ed25519 key pair, write `<path>` (private) and `<path>.pub`
@@ -69,7 +72,7 @@ pub fn generate_ed25519(
 
     let private_pem = match passphrase {
         Some(p) => private
-            .encrypt(&mut os_rng(), p)
+            .encrypt(&mut getrandom::SysRng, p)
             .map_err(|e| GapuraError::Crypto(format!("key encryption failed: {e}")))?
             .to_openssh(LineEnding::LF),
         None => private.to_openssh(LineEnding::LF),
