@@ -55,8 +55,12 @@ pub enum GapuraError {
         actual: String,
     },
 
-    #[error("connection refused or unreachable: {host}:{port}")]
-    ConnectFailed { host: String, port: u16 },
+    #[error("cannot reach {host}:{port}: {detail}")]
+    ConnectFailed {
+        host: String,
+        port: u16,
+        detail: String,
+    },
 
     // ---- generic ----
     #[error("{0}")]
@@ -70,6 +74,12 @@ pub enum GapuraError {
 
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),
+}
+
+impl From<russh::keys::Error> for GapuraError {
+    fn from(error: russh::keys::Error) -> Self {
+        GapuraError::Ssh(error.to_string())
+    }
 }
 
 impl GapuraError {
