@@ -12,9 +12,11 @@
 //!    boundary; errors and logs must not carry them.
 
 pub mod error;
+pub mod import_ssh_config;
 pub mod model;
 pub mod paths;
 pub mod settings;
+pub mod ssh;
 pub mod vault;
 
 pub use error::{GapuraError, Result};
