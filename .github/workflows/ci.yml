@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: Core (fmt, clippy, tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      # Scoped to gapura-core on purpose: the shell needs GTK/WebKit system
+      # libraries, which the dedicated `app` job installs.
+      - name: Clippy
+        run: cargo clippy -p gapura-core --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test -p gapura-core --all-targets
+
+  sshd-integration:
+    name: Core against real sshd
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Start local sshd with pubkey auth
+        run: |
+          sudo systemctl start ssh || sudo systemctl start sshd
+          ssh-keygen -t ed25519 -N '' -f "$HOME/.ssh/id_ed25519"
+          cat "$HOME/.ssh/id_ed25519.pub" >> "$HOME/.ssh/authorized_keys"
+          chmod 700 "$HOME/.ssh" && chmod 600 "$HOME/.ssh/authorized_keys"
+          echo "GAPURA_TEST_HOST=127.0.0.1" >> "$GITHUB_ENV"
+          echo "GAPURA_TEST_PORT=22" >> "$GITHUB_ENV"
+          echo "GAPURA_TEST_USER=$USER" >> "$GITHUB_ENV"
+          echo "GAPURA_TEST_KEY=$HOME/.ssh/id_ed25519" >> "$GITHUB_ENV"
+      - name: Integration tests
+        run: cargo test -p gapura-core --test ssh_integration
+
+  ui:
+    name: UI (svelte-check, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+
+  app:
+    name: App (clippy, build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install Tauri system libraries
+        run: >
+          sudo apt-get update && sudo apt-get install -y
+          libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev
+          librsvg2-dev libxdo-dev libssl-dev
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Build frontend (tauri context needs ui/dist)
+        run: npm ci && npm run build
+        working-directory: ui
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Build app
+        run: cargo build -p gapura
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@cargo-deny
+      - name: cargo deny (advisories, licenses, sources)
+        run: cargo deny check
