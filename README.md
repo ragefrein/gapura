@@ -54,14 +54,18 @@ Tauri system libraries are required (`libwebkit2gtk-4.1-dev` and friends).
 ```sh
 cd ui
 npm install
-npx tauri dev    # run the app in development mode
-npx tauri build  # produce installers
+
+# then, from the repository root (the Tauri CLI looks for src-tauri
+# in the current folder and below, so run it from here, not from ui/):
+npx --prefix ui tauri dev    # run the app in development mode
+npx --prefix ui tauri build  # produce installers
 ```
 
-Rust unit and integration tests live in `crates/gapura-core`:
+Rust unit and integration tests:
 
 ```sh
-cargo test -p gapura-core
+cargo test -p gapura-core   # core: vault, parser, sshd fixtures
+cargo test --workspace      # everything, incl. the command-layer E2E
 ```
 
 ## Security notes
