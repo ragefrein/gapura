@@ -5,6 +5,7 @@
 //! the Plan B backend (OpenSSH subprocess) is ever needed, it slots in here
 //! behind the same interface.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -62,6 +63,11 @@ impl std::fmt::Debug for ConnectOutcome {
     }
 }
 
+/// Remote-forward registry: which server-side listener maps to which local
+/// target. Keyed by `bind_host:bind_port` (as the server reports it in
+/// forwarded-tcpip channel opens), valued by the local dial target.
+pub type RemoteForwardRegistry = Arc<Mutex<HashMap<(String, u16), (String, u16)>>>;
+
 /// Shared out-of-band state the handshake handler writes to. The connection
 /// itself returns russh errors, so the fingerprint details travel beside it.
 #[derive(Default)]
@@ -75,10 +81,64 @@ pub struct ClientHandler {
     port: u16,
     known_hosts: Arc<Mutex<KnownHosts>>,
     info: Arc<HandshakeInfo>,
+    /// Targets for Remote forward rules (PRD F12).
+    remote_forwards: RemoteForwardRegistry,
 }
 
 impl client::Handler for ClientHandler {
     type Error = GapuraError;
+
+    /// A Remote forward rule fired: the server accepted a connection on the
+    /// listening port and hands us a channel. Dial the rule's local target
+    /// and pipe the two streams into each other.
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: russh::Channel<russh::client::Msg>,
+        connected_address: &str,
+        connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: russh::client::ChannelOpenHandle,
+        _session: &mut russh::client::Session,
+    ) -> Result<(), Self::Error> {
+        reply.accept().await;
+        let key = (connected_address.to_string(), connected_port as u16);
+        let target = self
+            .remote_forwards
+            .lock()
+            .ok()
+            .and_then(|map| map.get(&key).cloned());
+        let Some((target_host, target_port)) = target else {
+            tracing::warn!(
+                connected = %connected_address,
+                port = connected_port,
+                "forwarded connection for an unknown remote forward; closing"
+            );
+            return Ok(());
+        };
+        tracing::info!(
+            bind = %connected_address,
+            bind_port = connected_port,
+            %target_host,
+            target_port,
+            "remote forward connection accepted"
+        );
+        tokio::spawn(async move {
+            let mut channel = channel.into_stream();
+            let mut local =
+                match tokio::net::TcpStream::connect((target_host.as_str(), target_port)).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(
+                            "cannot reach local target {target_host}:{target_port}: {e}"
+                        );
+                        return;
+                    }
+                };
+            let _ = tokio::io::copy_bidirectional(&mut channel, &mut local).await;
+        });
+        Ok(())
+    }
 
     /// TOFU decision point (PRD F5). New hosts are pinned and remembered; a
     /// changed fingerprint aborts the handshake with
@@ -155,6 +215,7 @@ fn russh_config() -> Arc<client::Config> {
 pub async fn connect(
     params: ConnectParams,
     known_hosts: Arc<Mutex<KnownHosts>>,
+    remote_forwards: RemoteForwardRegistry,
 ) -> Result<ConnectOutcome> {
     let address = (params.host.as_str(), params.port);
     let info = Arc::new(HandshakeInfo::default());
@@ -163,6 +224,7 @@ pub async fn connect(
         port: params.port,
         known_hosts: Arc::clone(&known_hosts),
         info: Arc::clone(&info),
+        remote_forwards,
     };
 
     let mut handle = match client::connect(russh_config(), address, handler).await {

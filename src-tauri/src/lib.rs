@@ -68,6 +68,12 @@ pub fn run() {
             // import
             commands::status::check_connection_status,
             commands::status::parse_ssh_command_text,
+            commands::forwards::list_forward_rules,
+            commands::forwards::save_forward_rule,
+            commands::forwards::delete_forward_rule,
+            commands::forwards::list_active_forwards,
+            commands::forwards::start_forward,
+            commands::forwards::stop_forward,
             commands::import::import_ssh_config,
             commands::import::commit_import,
             commands::import::preview_import,

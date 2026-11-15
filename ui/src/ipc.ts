@@ -101,6 +101,31 @@ export interface ConnectionInput {
   notes: string;
 }
 
+export type ForwardKind = "local" | "remote";
+
+export interface ForwardRule {
+  id: string;
+  connection_id: string;
+  kind: ForwardKind;
+  bind_host: string;
+  bind_port: number;
+  target_host: string;
+  target_port: number;
+  enabled: boolean;
+  auto_start: boolean;
+  created_at: string;
+}
+
+export interface ActiveForward {
+  rule_id: string;
+  session_id: string;
+  kind: ForwardKind;
+  bind_host: string;
+  bind_port: number;
+  target_host: string;
+  target_port: number;
+}
+
 export interface SshCommandDraft {
   username: string | null;
   host: string;
@@ -180,6 +205,16 @@ export const api = {
 
   listKnownHosts: () => invoke<KnownHostEntry[]>("list_known_hosts"),
   removeKnownHost: (hostPort: string) => invoke<boolean>("remove_known_host", { hostPort }),
+
+  listForwardRules: (connectionId?: string) =>
+    invoke<ForwardRule[]>("list_forward_rules", { connectionId: connectionId ?? null }),
+  saveForwardRule: (input: Omit<ForwardRule, "id" | "created_at"> & { id?: string | null }) =>
+    invoke<ForwardRule>("save_forward_rule", { input }),
+  deleteForwardRule: (id: string) => invoke<void>("delete_forward_rule", { id }),
+  listActiveForwards: () => invoke<ActiveForward[]>("list_active_forwards"),
+  startForward: (sessionId: string, ruleId: string) =>
+    invoke<void>("start_forward", { sessionId, ruleId }),
+  stopForward: (ruleId: string) => invoke<void>("stop_forward", { ruleId }),
 
   checkConnectionStatus: (ids: string[]) =>
     invoke<ConnectionStatus[]>("check_connection_status", { ids }),
