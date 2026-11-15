@@ -30,7 +30,7 @@ pub fn list_snippets(
             .filter(|s| s.connection_id.is_none() || s.connection_id == connection_id)
             .cloned()
             .collect();
-        snippets.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        snippets.sort_by_key(|a| a.name.to_lowercase());
         Ok(snippets)
     })
 }

@@ -57,6 +57,9 @@ fn server_config(host_key: PrivateKey) -> Arc<russh::server::Config> {
 #[derive(Clone)]
 struct EchoHandler {
     authorized_fp: Option<Arc<String>>,
+    /// Channel ids that had a shell requested; direct-tcpip tunnels must NOT
+    /// be echoed or the client's handshake through them gets corrupted.
+    shell_channels: Arc<Mutex<std::collections::HashSet<ChannelId>>>,
 }
 
 impl Handler for EchoHandler {
@@ -110,12 +113,42 @@ impl Handler for EchoHandler {
         }
     }
 
+    async fn channel_open_direct_tcpip(
+        &mut self,
+        channel: russh::Channel<Msg>,
+        address_to_connect: &str,
+        port_to_connect: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: russh::server::ChannelOpenHandle,
+        _session: &mut russh::server::Session,
+    ) -> Result<(), Self::Error> {
+        reply.accept().await;
+        let address_to_connect = address_to_connect.to_string();
+        tokio::spawn(async move {
+            let mut tunnel = channel.into_stream();
+            let mut target =
+                match tokio::net::TcpStream::connect((address_to_connect, port_to_connect as u16))
+                    .await
+                {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!("direct-tcpip target unreachable: {e}");
+                        return;
+                    }
+                };
+            let _ = tokio::io::copy_bidirectional(&mut tunnel, &mut target).await;
+        });
+        Ok(())
+    }
+
     async fn shell_request(
         &mut self,
         channel: ChannelId,
         session: &mut russh::server::Session,
     ) -> Result<(), Self::Error> {
         let _ = session.channel_success(channel);
+        self.shell_channels.lock().unwrap().insert(channel);
         session.data(channel, "Gapura echo shell ready\r\n")?;
         Ok(())
     }
@@ -159,6 +192,7 @@ async fn spawn_echo_server(authorized_fp: Option<String>) -> EchoServer {
     .expect("host key generation cannot fail");
     let handler = EchoHandler {
         authorized_fp: authorized_fp.clone().map(Arc::new),
+        shell_channels: Arc::new(Mutex::new(std::collections::HashSet::new())),
     };
     let config = server_config(host_key.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -447,10 +481,6 @@ async fn known_hosts_persist_between_connections() {
     assert_eq!(reloaded.entries()[0].host_port, host_port);
     server.stop();
 }
-
-// ---------------------------------------------------------------------------
-// Real OpenSSH server (CI only)
-// ---------------------------------------------------------------------------
 
 fn real_sshd_env() -> Option<(String, u16, String, PathBuf)> {
     let host = std::env::var("GAPURA_TEST_HOST").ok()?;
