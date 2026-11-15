@@ -29,6 +29,7 @@
   import KeysView from "./components/KeysView.svelte";
   import ImportReview from "./components/ImportReview.svelte";
   import Forwards from "./components/Forwards.svelte";
+  import Snippets from "./components/Snippets.svelte";
   import Toasts from "./components/Toasts.svelte";
 
   interface HostKeyMismatch {
@@ -49,6 +50,7 @@
   let hostKeyMismatch = $state<HostKeyMismatch | null>(null);
   let importOpen = $state(false);
   let forwardsTarget = $state<Connection | null>(null);
+  let snippetsOpen = $state(false);
   let bootstrapped = $state(false);
   let checking = $state(false);
 
@@ -381,6 +383,7 @@
   <CommandPalette
     onConnect={(connection) => void connect(connection)}
     onQuickConnect={(text) => void quickConnect(text)}
+    onManageSnippets={() => (snippetsOpen = true)}
     onClose={() => (paletteOpen = false)}
   />
 {/if}
@@ -412,6 +415,10 @@
     onUpdate={acceptNewHostKey}
     onCancel={() => (hostKeyMismatch = null)}
   />
+{/if}
+
+{#if snippetsOpen}
+  <Snippets onClose={() => (snippetsOpen = false)} />
 {/if}
 
 {#if forwardsTarget}

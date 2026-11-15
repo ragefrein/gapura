@@ -187,7 +187,18 @@ async fn open_and_register<R: Runtime>(
 
     let known_hosts = Arc::clone(&state.known_hosts);
     let remote_forwards: RemoteForwardRegistry = Default::default();
-    let outcome = connect(params, known_hosts, Arc::clone(&remote_forwards)).await?;
+    let hops = resolve_jump_chain(state, connection.id)?;
+    let outcome = if hops.is_empty() {
+        connect(params, known_hosts, Arc::clone(&remote_forwards)).await?
+    } else {
+        gapura_core::ssh::backend::connect_with_jump(
+            &hops,
+            &params,
+            known_hosts,
+            Arc::clone(&remote_forwards),
+        )
+        .await?
+    };
 
     if outcome.new_host_key {
         let _ = app.emit(
@@ -227,6 +238,50 @@ async fn open_and_register<R: Runtime>(
         fingerprint: outcome.fingerprint,
         new_host_key: outcome.new_host_key,
     })
+}
+
+/// Resolve the jump chain for a connection (PRD F13): follow jump_host_id
+/// up to two levels, rejecting cycles and missing connections.
+fn resolve_jump_chain(
+    state: &tauri::State<'_, AppState>,
+    connection_id: Uuid,
+) -> CommandResult<Vec<ConnectParams>> {
+    let mut chain: Vec<ConnectParams> = Vec::new();
+    let mut seen: Vec<Uuid> = vec![connection_id];
+    let mut next_id = state.with_vault(|vault| {
+        Ok(vault
+            .payload
+            .connection(connection_id)
+            .and_then(|c| c.jump_host_id))
+    })?;
+    while let Some(jump_id) = next_id {
+        if chain.len() >= 2 {
+            return Err(GapuraError::Other(
+                "jump chains are limited to two levels".into(),
+            ));
+        }
+        if seen.contains(&jump_id) {
+            return Err(GapuraError::Other(
+                "jump host chain loops back on itself".into(),
+            ));
+        }
+        let jump = state.with_vault(|vault| {
+            vault
+                .payload
+                .connection(jump_id)
+                .cloned()
+                .ok_or_else(|| GapuraError::Other("the jump host connection is missing".into()))
+        })?;
+        next_id = jump.jump_host_id;
+        seen.push(jump_id);
+        chain.push(ConnectParams {
+            host: jump.host.clone(),
+            port: jump.port,
+            username: jump.username.clone(),
+            auth: resolve_auth(state, &jump)?,
+        });
+    }
+    Ok(chain)
 }
 
 /// Pull concrete credentials out of the vault at connect time (design doc:
