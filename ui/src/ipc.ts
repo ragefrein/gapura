@@ -99,6 +99,7 @@ export interface ConnectionInput {
   tags: string[];
   color: string | null;
   notes: string;
+  jump_host_id: string | null;
 }
 
 export type ForwardKind = "local" | "remote";
@@ -124,6 +125,14 @@ export interface ActiveForward {
   bind_port: number;
   target_host: string;
   target_port: number;
+}
+
+export interface Snippet {
+  id: string;
+  name: string;
+  command: string;
+  connection_id: string | null;
+  created_at: string;
 }
 
 export interface SshCommandDraft {
@@ -215,6 +224,16 @@ export const api = {
   startForward: (sessionId: string, ruleId: string) =>
     invoke<void>("start_forward", { sessionId, ruleId }),
   stopForward: (ruleId: string) => invoke<void>("stop_forward", { ruleId }),
+
+  listSnippets: (connectionId?: string) =>
+    invoke<Snippet[]>("list_snippets", { connectionId: connectionId ?? null }),
+  saveSnippet: (input: {
+    id?: string | null;
+    name: string;
+    command: string;
+    connection_id?: string | null;
+  }) => invoke<Snippet>("save_snippet", { input }),
+  deleteSnippet: (id: string) => invoke<void>("delete_snippet", { id }),
 
   checkConnectionStatus: (ids: string[]) =>
     invoke<ConnectionStatus[]>("check_connection_status", { ids }),

@@ -38,6 +38,8 @@ pub struct ConnectionInput {
     pub color: Option<String>,
     #[serde(default)]
     pub notes: String,
+    #[serde(default)]
+    pub jump_host_id: Option<Uuid>,
 }
 
 #[tauri::command]
@@ -121,7 +123,7 @@ pub fn save_connection(
             auth,
             tags: input.tags,
             color: input.color,
-            jump_host_id: None,
+            jump_host_id: input.jump_host_id,
             notes: input.notes,
             created_at: now,
             updated_at: now,

@@ -2,6 +2,7 @@
   import { Eye, EyeOff } from "@lucide/svelte";
   import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
   import { api, type Connection, type SshCommandDraft } from "../ipc";
+  import { connections as connectionsStore } from "../stores";
   import { groups, pushToast } from "../stores";
   import Modal from "./Modal.svelte";
 
@@ -56,7 +57,11 @@
   // svelte-ignore state_referenced_locally
   let tagsText = $state(connection?.tags.join(", ") ?? "");
   // svelte-ignore state_referenced_locally
+  // svelte-ignore state_referenced_locally
+  let jumpId = $state<string | null>(connection?.jump_host_id ?? null);
+  // svelte-ignore state_referenced_locally
   let notes = $state(connection?.notes ?? "");
+
 
   let saving = $state(false);
   let error = $state<string | null>(null);
@@ -65,6 +70,8 @@
   let creatingGroup = $state(false);
 
   const isEdit = $derived(connection !== null);
+
+  const otherConnections = $derived($connectionsStore.filter((c) => c.id !== connection?.id));
 
   async function browseKey() {
     const picked = await openFileDialog({
@@ -120,6 +127,7 @@
           .filter(Boolean),
         color,
         notes,
+        jump_host_id: jumpId,
       });
       onSaved(saved);
     } catch (e) {
@@ -147,6 +155,16 @@
           <option value="__new">{creatingGroup ? "Name:" : "New folder..."}</option>
         </select>
       </div>
+    </div>
+
+    <div class="field">
+      <label for="f-jump">Jump via (bastion)</label>
+      <select id="f-jump" bind:value={jumpId}>
+        <option value={null}>Direct connection</option>
+        {#each otherConnections as other (other.id)}
+          <option value={other.id}>{other.name} — {other.username}@{other.host}</option>
+        {/each}
+      </select>
     </div>
 
     {#if groupId === "__new"}
