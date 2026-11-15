@@ -90,7 +90,11 @@
     t.unicode.activeVersion = "unicode11";
 
     try {
-      t.loadAddon(new WebglAddon());
+      const webgl = new WebglAddon();
+      // A lost GL context renders as a black canvas; dropping the addon
+      // switches xterm back to the DOM renderer instead.
+      webgl.onContextLoss(() => webgl.dispose());
+      t.loadAddon(webgl);
     } catch {
       // WebGL unavailable (headless, blocked GPU): the DOM renderer is fine.
     }
