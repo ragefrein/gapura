@@ -13,7 +13,7 @@ use uuid::Uuid;
 use zeroize::Zeroize;
 
 /// Bumped on every breaking change to [`VaultPayload`]. See `vault::migrate`.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// A string secret (password, key passphrase) that lives inside the vault
 /// payload. Serializing is allowed because the payload only ever exists
@@ -166,6 +166,47 @@ pub struct SshKey {
 }
 
 /// The decrypted content of the vault file.
+/// One port-forwarding rule attached to a connection (PRD F12).
+///
+/// - `Local`: Gapura listens on `bind_host:bind_port` and tunnels each
+///   accepted connection to `target_host:target_port` through the SSH
+///   session (the `-L` of OpenSSH).
+/// - `Remote`: the server listens on `bind_host:bind_port` and tunnels each
+///   accepted connection back to `target_host:target_port` on Gapura's
+///   machine (the `-R`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ForwardRule {
+    pub id: Uuid,
+    pub connection_id: Uuid,
+    pub kind: ForwardKind,
+    pub bind_host: String,
+    pub bind_port: u16,
+    pub target_host: String,
+    pub target_port: u16,
+    /// Enabled rules with auto_start start as soon as a session opens.
+    pub enabled: bool,
+    pub auto_start: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ForwardKind {
+    Local,
+    Remote,
+}
+
+/// A saved command that can be sent to an open session (PRD F14). Tied to a
+/// connection when `connection_id` is set, global otherwise.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Snippet {
+    pub id: Uuid,
+    pub name: String,
+    pub command: String,
+    pub connection_id: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct VaultPayload {
     pub schema_version: u32,
@@ -177,6 +218,10 @@ pub struct VaultPayload {
     pub secrets: Vec<SecretSlot>,
     #[serde(default)]
     pub keys: Vec<SshKey>,
+    #[serde(default)]
+    pub forward_rules: Vec<ForwardRule>,
+    #[serde(default)]
+    pub snippets: Vec<Snippet>,
 }
 
 impl VaultPayload {
@@ -187,6 +232,8 @@ impl VaultPayload {
             connections: Vec::new(),
             secrets: Vec::new(),
             keys: Vec::new(),
+            forward_rules: Vec::new(),
+            snippets: Vec::new(),
         }
     }
 
@@ -259,6 +306,8 @@ mod tests {
                 created_at: now(),
             }],
             keys: vec![],
+            forward_rules: vec![],
+            snippets: vec![],
         };
 
         let json = serde_json::to_string(&payload).unwrap();

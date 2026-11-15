@@ -10,6 +10,17 @@
 const MAX_PENDING_BYTES = 1024 * 1024;
 
 const writers = new Map<string, (data: Uint8Array) => void>();
+
+/// UTF-8 safe base64 (btoa alone chokes on non-Latin1).
+export function utf8ToBase64(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let binary = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
 const pending = new Map<string, Uint8Array[]>();
 
 export function registerWriter(sessionId: string, write: (data: Uint8Array) => void) {

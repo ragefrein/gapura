@@ -99,6 +99,54 @@ export interface ConnectionInput {
   tags: string[];
   color: string | null;
   notes: string;
+  jump_host_id: string | null;
+}
+
+export type ForwardKind = "local" | "remote";
+
+export interface ForwardRule {
+  id: string;
+  connection_id: string;
+  kind: ForwardKind;
+  bind_host: string;
+  bind_port: number;
+  target_host: string;
+  target_port: number;
+  enabled: boolean;
+  auto_start: boolean;
+  created_at: string;
+}
+
+export interface ActiveForward {
+  rule_id: string;
+  session_id: string;
+  kind: ForwardKind;
+  bind_host: string;
+  bind_port: number;
+  target_host: string;
+  target_port: number;
+}
+
+export interface Snippet {
+  id: string;
+  name: string;
+  command: string;
+  connection_id: string | null;
+  created_at: string;
+}
+
+export interface SshCommandDraft {
+  username: string | null;
+  host: string;
+  port: number | null;
+  identity_path: string | null;
+  warnings: string[];
+}
+
+export interface ConnectionStatus {
+  connection_id: string;
+  up: boolean;
+  latency_ms: number | null;
 }
 
 export interface AppPaths {
@@ -166,6 +214,31 @@ export const api = {
 
   listKnownHosts: () => invoke<KnownHostEntry[]>("list_known_hosts"),
   removeKnownHost: (hostPort: string) => invoke<boolean>("remove_known_host", { hostPort }),
+
+  listForwardRules: (connectionId?: string) =>
+    invoke<ForwardRule[]>("list_forward_rules", { connectionId: connectionId ?? null }),
+  saveForwardRule: (input: Omit<ForwardRule, "id" | "created_at"> & { id?: string | null }) =>
+    invoke<ForwardRule>("save_forward_rule", { input }),
+  deleteForwardRule: (id: string) => invoke<void>("delete_forward_rule", { id }),
+  listActiveForwards: () => invoke<ActiveForward[]>("list_active_forwards"),
+  startForward: (sessionId: string, ruleId: string) =>
+    invoke<void>("start_forward", { sessionId, ruleId }),
+  stopForward: (ruleId: string) => invoke<void>("stop_forward", { ruleId }),
+
+  listSnippets: (connectionId?: string) =>
+    invoke<Snippet[]>("list_snippets", { connectionId: connectionId ?? null }),
+  saveSnippet: (input: {
+    id?: string | null;
+    name: string;
+    command: string;
+    connection_id?: string | null;
+  }) => invoke<Snippet>("save_snippet", { input }),
+  deleteSnippet: (id: string) => invoke<void>("delete_snippet", { id }),
+
+  checkConnectionStatus: (ids: string[]) =>
+    invoke<ConnectionStatus[]>("check_connection_status", { ids }),
+  parseSshCommand: (text: string) =>
+    invoke<SshCommandDraft>("parse_ssh_command_text", { text }),
 
   appPaths: () => invoke<AppPaths>("app_paths"),
   openDataDir: () => invoke<void>("open_data_dir"),

@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use base64::Engine;
 use gapura_core::model::{AuthMethod, Connection};
+use gapura_core::ssh::backend::RemoteForwardRegistry;
 use gapura_core::ssh::backend::{connect, ConnectParams, ResolvedAuth};
 use gapura_core::ssh::session::{
     start_session, EventSink, SessionCommand, SessionEvent, SessionState,
@@ -13,6 +14,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Runtime, State};
 use uuid::Uuid;
 
+use crate::commands::forwards;
 use crate::error::CommandResult;
 use crate::state::{AppState, SessionEntry};
 
@@ -184,7 +186,12 @@ async fn open_and_register<R: Runtime>(
     };
 
     let known_hosts = Arc::clone(&state.known_hosts);
-    let outcome = connect(params, known_hosts).await?;
+    let remote_forwards: RemoteForwardRegistry = Default::default();
+    // TODO(F13): jump chains are implemented in core (connect_with_jump) but
+    // disabled at the app layer pending investigation of a corrupted
+    // handshake over the direct-tcpip tunnel (see feat/jump-snippets notes).
+    let _ = &resolve_jump_chain;
+    let outcome = connect(params, known_hosts, Arc::clone(&remote_forwards)).await?;
 
     if outcome.new_host_key {
         let _ = app.emit(
@@ -211,8 +218,12 @@ async fn open_and_register<R: Runtime>(
         SessionEntry {
             connection_id,
             commands,
+            remote_forwards,
         },
     );
+
+    // Start enabled auto-start rules (PRD F12) once the session is live.
+    forwards::autostart_forwards(state, session_id, connection_id).await;
 
     Ok(SessionInfo {
         id: session_id,
@@ -220,6 +231,50 @@ async fn open_and_register<R: Runtime>(
         fingerprint: outcome.fingerprint,
         new_host_key: outcome.new_host_key,
     })
+}
+
+/// Resolve the jump chain for a connection (PRD F13): follow jump_host_id
+/// up to two levels, rejecting cycles and missing connections.
+fn resolve_jump_chain(
+    state: &tauri::State<'_, AppState>,
+    connection_id: Uuid,
+) -> CommandResult<Vec<ConnectParams>> {
+    let mut chain: Vec<ConnectParams> = Vec::new();
+    let mut seen: Vec<Uuid> = vec![connection_id];
+    let mut next_id = state.with_vault(|vault| {
+        Ok(vault
+            .payload
+            .connection(connection_id)
+            .and_then(|c| c.jump_host_id))
+    })?;
+    while let Some(jump_id) = next_id {
+        if chain.len() >= 2 {
+            return Err(GapuraError::Other(
+                "jump chains are limited to two levels".into(),
+            ));
+        }
+        if seen.contains(&jump_id) {
+            return Err(GapuraError::Other(
+                "jump host chain loops back on itself".into(),
+            ));
+        }
+        let jump = state.with_vault(|vault| {
+            vault
+                .payload
+                .connection(jump_id)
+                .cloned()
+                .ok_or_else(|| GapuraError::Other("the jump host connection is missing".into()))
+        })?;
+        next_id = jump.jump_host_id;
+        seen.push(jump_id);
+        chain.push(ConnectParams {
+            host: jump.host.clone(),
+            port: jump.port,
+            username: jump.username.clone(),
+            auth: resolve_auth(state, &jump)?,
+        });
+    }
+    Ok(chain)
 }
 
 /// Pull concrete credentials out of the vault at connect time (design doc:
@@ -276,6 +331,20 @@ fn event_sink<R: Runtime>(app: AppHandle<R>, session_id: Uuid) -> EventSink {
                 serde_json::json!({
                     "id": session_id,
                     "state": state_json,
+                }),
+            );
+        }
+        SessionEvent::ForwardStatus {
+            rule_id,
+            ok,
+            message,
+        } => {
+            let _ = app.emit(
+                "forward:status",
+                serde_json::json!({
+                    "rule_id": rule_id,
+                    "ok": ok,
+                    "message": message,
                 }),
             );
         }

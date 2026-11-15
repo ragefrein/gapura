@@ -7,16 +7,22 @@
     FileUp,
     Lock,
     Sun,
+    SquareTerminal as TerminalSquareIcon,
   } from "@lucide/svelte";
-  import { api, type Connection } from "../ipc";
-  import { activeView, connections } from "../stores";
+  import { api, type Connection, type Snippet } from "../ipc";
+  import { activeSessionId, activeView, connections, pushToast, sessions } from "../stores";
+  import { utf8ToBase64 } from "../terminalBus";
   import { fuzzyFilter } from "../fuzzy";
 
   let {
     onConnect,
+    onQuickConnect,
+    onManageSnippets,
     onClose,
   }: {
     onConnect: (connection: Connection) => void;
+    onQuickConnect: (text: string) => void;
+    onManageSnippets: () => void;
     onClose: () => void;
   } = $props();
 
@@ -60,6 +66,12 @@
       run: () => activeView.set("keys"),
     },
     {
+      id: "action-snippets",
+      label: "Manage snippets",
+      icon: TerminalSquareIcon,
+      run: () => onManageSnippets(),
+    },
+    {
       id: "action-settings",
       label: "Settings",
       icon: Settings,
@@ -79,6 +91,18 @@
     },
   ];
 
+  // Typing an ssh command offers one-click connection creation.
+  const quickConnectAction = $derived.by(() => {
+    const q = query.trim();
+    if (q.length < 5 || !q.toLowerCase().startsWith("ssh")) return null;
+    return {
+      id: "quick-connect",
+      label: `Create connection from: ${q}`,
+      icon: Plus,
+      run: () => onQuickConnect(q),
+    };
+  });
+
   const matchedConnections = $derived(
     query.trim()
       ? fuzzyFilter($connections, (c) => `${c.name} ${c.host} ${c.username}`, query)
@@ -89,12 +113,36 @@
     query.trim() ? fuzzyFilter(actions, (a) => a.label, query) : actions,
   );
 
+  // Snippets for the active session's connection; running one types it into
+  // the terminal and presses enter.
+  const activeSession = $derived($sessions.find((s) => s.id === $activeSessionId && s.state !== "closed") ?? null);
+  let snippets = $state<Snippet[]>([]);
+  $effect(() => {
+    if (activeSession) {
+      void api.listSnippets(activeSession.connectionId).then((list) => (snippets = list));
+    }
+  });
+  const matchedSnippets = $derived.by(() => {
+    if (!activeSession) return [];
+    if (!query.trim()) return snippets;
+    return fuzzyFilter(snippets, (s) => `${s.name} ${s.command}`, query);
+  });
+
   const flatResults = $derived.by(() => {
-    const results: Array<{ type: "connection"; value: Connection } | { type: "action"; value: Action }> = [];
+    const results: Array<
+      | { type: "connection"; value: Connection }
+      | { type: "action"; value: Action }
+      | { type: "snippet"; value: Snippet }
+    > = [];
+    if (quickConnectAction) results.push({ type: "action", value: quickConnectAction });
     for (const c of matchedConnections) results.push({ type: "connection", value: c });
+    for (const sn of matchedSnippets) results.push({ type: "snippet", value: sn });
     for (const a of matchedActions) results.push({ type: "action", value: a });
     return results;
   });
+
+  const snippetBase = $derived((quickConnectAction ? 1 : 0) + matchedConnections.length);
+  const actionBase = $derived(snippetBase + matchedSnippets.length);
 
   $effect(() => {
     if (selected >= flatResults.length) selected = Math.max(0, flatResults.length - 1);
@@ -109,7 +157,14 @@
     const entry = flatResults[selected];
     if (!entry) return;
     if (entry.type === "connection") onConnect(entry.value);
-    else void entry.value.run();
+    else if (entry.type === "snippet") {
+      const active = $sessions.find((s) => s.id === $activeSessionId);
+      if (active) {
+        void api.sessionWrite(active.id, utf8ToBase64(entry.value.command + "\n"));
+        pushToast("info", `Sent: ${entry.value.name}`);
+      }
+      onClose();
+    } else void entry.value.run();
     onClose();
   }
 
@@ -152,6 +207,20 @@
     </div>
 
     <div class="results">
+      {#if quickConnectAction}
+        <button
+          class="result"
+          class:selected={selected === 0}
+          onclick={() => {
+            void quickConnectAction.run();
+            onClose();
+          }}
+          onmousemove={() => (selected = 0)}
+        >
+          <span class="icon"><quickConnectAction.icon size={14} /></span>
+          <span class="label">{quickConnectAction.label}</span>
+        </button>
+      {/if}
       {#if matchedConnections.length}
         <p class="section">Connections</p>
         {#each matchedConnections as connection, i (connection.id)}
@@ -172,10 +241,34 @@
         {/each}
       {/if}
 
+      {#if matchedSnippets.length}
+        <p class="section">Snippets</p>
+        {#each matchedSnippets as snippet, k (snippet.id)}
+          {@const index = snippetBase + k}
+          <button
+            class="result"
+            class:selected={index === selected}
+            onclick={() => {
+              const active = $sessions.find((s) => s.id === $activeSessionId);
+              if (active) {
+                void api.sessionWrite(active.id, utf8ToBase64(snippet.command + "\n"));
+                pushToast("info", `Sent: ${snippet.name}`);
+              }
+              onClose();
+            }}
+            onmousemove={() => (selected = index)}
+          >
+            <span class="icon"><TerminalSquareIcon size={14} /></span>
+            <span class="label">{snippet.name}</span>
+            <span class="meta mono">{snippet.command}</span>
+          </button>
+        {/each}
+      {/if}
+
       {#if matchedActions.length}
         <p class="section">Actions</p>
         {#each matchedActions as action, j (action.id)}
-          {@const index = matchedConnections.length + j}
+          {@const index = actionBase + j}
           <button
             class="result"
             class:selected={index === selected}

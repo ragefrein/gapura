@@ -5,6 +5,7 @@
 //! the Plan B backend (OpenSSH subprocess) is ever needed, it slots in here
 //! behind the same interface.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -62,6 +63,11 @@ impl std::fmt::Debug for ConnectOutcome {
     }
 }
 
+/// Remote-forward registry: which server-side listener maps to which local
+/// target. Keyed by `bind_host:bind_port` (as the server reports it in
+/// forwarded-tcpip channel opens), valued by the local dial target.
+pub type RemoteForwardRegistry = Arc<Mutex<HashMap<(String, u16), (String, u16)>>>;
+
 /// Shared out-of-band state the handshake handler writes to. The connection
 /// itself returns russh errors, so the fingerprint details travel beside it.
 #[derive(Default)]
@@ -75,10 +81,64 @@ pub struct ClientHandler {
     port: u16,
     known_hosts: Arc<Mutex<KnownHosts>>,
     info: Arc<HandshakeInfo>,
+    /// Targets for Remote forward rules (PRD F12).
+    remote_forwards: RemoteForwardRegistry,
 }
 
 impl client::Handler for ClientHandler {
     type Error = GapuraError;
+
+    /// A Remote forward rule fired: the server accepted a connection on the
+    /// listening port and hands us a channel. Dial the rule's local target
+    /// and pipe the two streams into each other.
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: russh::Channel<russh::client::Msg>,
+        connected_address: &str,
+        connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: russh::client::ChannelOpenHandle,
+        _session: &mut russh::client::Session,
+    ) -> Result<(), Self::Error> {
+        reply.accept().await;
+        let key = (connected_address.to_string(), connected_port as u16);
+        let target = self
+            .remote_forwards
+            .lock()
+            .ok()
+            .and_then(|map| map.get(&key).cloned());
+        let Some((target_host, target_port)) = target else {
+            tracing::warn!(
+                connected = %connected_address,
+                port = connected_port,
+                "forwarded connection for an unknown remote forward; closing"
+            );
+            return Ok(());
+        };
+        tracing::info!(
+            bind = %connected_address,
+            bind_port = connected_port,
+            %target_host,
+            target_port,
+            "remote forward connection accepted"
+        );
+        tokio::spawn(async move {
+            let mut channel = channel.into_stream();
+            let mut local =
+                match tokio::net::TcpStream::connect((target_host.as_str(), target_port)).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(
+                            "cannot reach local target {target_host}:{target_port}: {e}"
+                        );
+                        return;
+                    }
+                };
+            let _ = tokio::io::copy_bidirectional(&mut channel, &mut local).await;
+        });
+        Ok(())
+    }
 
     /// TOFU decision point (PRD F5). New hosts are pinned and remembered; a
     /// changed fingerprint aborts the handshake with
@@ -137,6 +197,96 @@ impl From<russh::Error> for GapuraError {
     }
 }
 
+/// Connect through a jump chain (PRD F13): dial each hop in order over the
+/// previous hop's direct-tcpip channel, then run the normal connect flow
+/// against the final target. `hops` is ordered outermost first; the target
+/// itself is NOT part of the list. TOFU applies to every hop.
+pub async fn connect_with_jump(
+    hops: &[ConnectParams],
+    target: &ConnectParams,
+    known_hosts: Arc<Mutex<KnownHosts>>,
+    remote_forwards: RemoteForwardRegistry,
+) -> Result<ConnectOutcome> {
+    if hops.is_empty() {
+        return Box::pin(connect(target.clone(), known_hosts, remote_forwards)).await;
+    }
+    tracing::info!(hops = hops.len(), "connecting through jump host chain");
+    let mut current = connect(
+        hops[0].clone(),
+        Arc::clone(&known_hosts),
+        Arc::new(Mutex::new(HashMap::new())),
+    )
+    .await?;
+    for (index, hop) in hops.iter().enumerate().skip(1) {
+        current = tunnel_to(current, hop, &known_hosts, index, None).await?;
+    }
+    // The remote-forward registry belongs to the final connection only.
+    tunnel_to(
+        current,
+        target,
+        &known_hosts,
+        hops.len(),
+        Some(remote_forwards),
+    )
+    .await
+}
+
+/// Dial `next` through `outcome`'s session with a direct-tcpip channel and
+/// run the SSH handshake over that tunnel.
+async fn tunnel_to(
+    outcome: ConnectOutcome,
+    next: &ConnectParams,
+    known_hosts: &Arc<Mutex<KnownHosts>>,
+    index: usize,
+    remote_forwards: Option<RemoteForwardRegistry>,
+) -> Result<ConnectOutcome> {
+    let info = Arc::new(HandshakeInfo::default());
+    let handler = ClientHandler {
+        host: next.host.clone(),
+        port: next.port,
+        known_hosts: Arc::clone(known_hosts),
+        info: Arc::clone(&info),
+        remote_forwards: remote_forwards.unwrap_or_default(),
+    };
+    let config = russh_config();
+    let channel = outcome
+        .handle
+        .channel_open_direct_tcpip(next.host.as_str(), next.port as u32, "127.0.0.1", 0)
+        .await
+        .map_err(|e| GapuraError::ConnectFailed {
+            host: next.host.clone(),
+            port: next.port,
+            detail: format!("jump refused the tunnel: {e}"),
+        })?;
+    let stream = channel.into_stream();
+    let mut handle = match client::connect_stream(config, stream, handler).await {
+        Ok(handle) => handle,
+        Err(e @ (GapuraError::HostKeyMismatch { .. } | GapuraError::Other(_))) => return Err(e),
+        Err(e) => {
+            return Err(GapuraError::ConnectFailed {
+                host: next.host.clone(),
+                port: next.port,
+                detail: e.to_string(),
+            })
+        }
+    };
+    authenticate(&mut handle, next).await?;
+    let (fingerprint, algorithm) = info
+        .key_info
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_else(|| (String::new(), String::from("unknown")));
+    let new_host_key = info.new_host_key.load(Ordering::SeqCst);
+    tracing::info!(index, host = %next.host, "jump hop established");
+    Ok(ConnectOutcome {
+        handle,
+        fingerprint,
+        algorithm,
+        new_host_key,
+    })
+}
+
 /// SSH-2 client id; identifies the app on the wire.
 const CLIENT_ID: &str = "SSH-2.0-Gapura_0.1";
 
@@ -155,6 +305,7 @@ fn russh_config() -> Arc<client::Config> {
 pub async fn connect(
     params: ConnectParams,
     known_hosts: Arc<Mutex<KnownHosts>>,
+    remote_forwards: RemoteForwardRegistry,
 ) -> Result<ConnectOutcome> {
     let address = (params.host.as_str(), params.port);
     let info = Arc::new(HandshakeInfo::default());
@@ -163,6 +314,7 @@ pub async fn connect(
         port: params.port,
         known_hosts: Arc::clone(&known_hosts),
         info: Arc::clone(&info),
+        remote_forwards,
     };
 
     let mut handle = match client::connect(russh_config(), address, handler).await {

@@ -69,6 +69,7 @@ async fn full_flow_through_commands() {
             tags: vec![],
             color: None,
             notes: String::new(),
+            jump_host_id: None,
         },
     )
     .expect("connection saved");
@@ -198,6 +199,7 @@ async fn tofu_mismatch_surfaces_through_commands() {
             tags: vec![],
             color: None,
             notes: String::new(),
+            jump_host_id: None,
         },
     )
     .expect("connection saved");

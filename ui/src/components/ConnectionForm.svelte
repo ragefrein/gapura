@@ -1,16 +1,19 @@
 <script lang="ts">
   import { Eye, EyeOff } from "@lucide/svelte";
   import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
-  import { api, type Connection } from "../ipc";
+  import { api, type Connection, type SshCommandDraft } from "../ipc";
+  import { connections as connectionsStore } from "../stores";
   import { groups, pushToast } from "../stores";
   import Modal from "./Modal.svelte";
 
   let {
     connection,
+    prefill,
     onClose,
     onSaved,
   }: {
     connection: Connection | null;
+    prefill: SshCommandDraft | null;
     onClose: () => void;
     onSaved: (connection: Connection) => void;
   } = $props();
@@ -26,23 +29,25 @@
     "#64748b",
   ];
 
-  // The form intentionally captures the connection as it was when opened.
+  // The form intentionally captures the connection as it was when opened,
+  // either an existing connection or a draft parsed from an ssh command.
   // svelte-ignore state_referenced_locally
-  let name = $state(connection?.name ?? "");
+  let name = $state(connection?.name ?? prefill?.host ?? "");
   // svelte-ignore state_referenced_locally
-  let host = $state(connection?.host ?? "");
+  let host = $state(connection?.host ?? prefill?.host ?? "");
   // svelte-ignore state_referenced_locally
-  let port = $state(connection?.port ?? 22);
+  let port = $state(connection?.port ?? prefill?.port ?? 22);
   // svelte-ignore state_referenced_locally
-  let username = $state(connection?.username ?? "");
+  let username = $state(connection?.username ?? prefill?.username ?? "");
   // svelte-ignore state_referenced_locally
   let authKind = $state<"agent" | "password" | "key_file">(
-    connection?.auth.kind ?? "agent",
+    prefill?.identity_path ? "key_file" : (connection?.auth.kind ?? "agent"),
   );
   let password = $state("");
   // svelte-ignore state_referenced_locally
   let keyPath = $state(
-    connection?.auth.kind === "key_file" ? connection.auth.data.path : "",
+    prefill?.identity_path ??
+      (connection?.auth.kind === "key_file" ? connection.auth.data.path : ""),
   );
   let keyPassphrase = $state("");
   // svelte-ignore state_referenced_locally
@@ -52,7 +57,11 @@
   // svelte-ignore state_referenced_locally
   let tagsText = $state(connection?.tags.join(", ") ?? "");
   // svelte-ignore state_referenced_locally
+  // svelte-ignore state_referenced_locally
+  let jumpId = $state<string | null>(connection?.jump_host_id ?? null);
+  // svelte-ignore state_referenced_locally
   let notes = $state(connection?.notes ?? "");
+
 
   let saving = $state(false);
   let error = $state<string | null>(null);
@@ -61,6 +70,8 @@
   let creatingGroup = $state(false);
 
   const isEdit = $derived(connection !== null);
+
+  const otherConnections = $derived($connectionsStore.filter((c) => c.id !== connection?.id));
 
   async function browseKey() {
     const picked = await openFileDialog({
@@ -116,6 +127,7 @@
           .filter(Boolean),
         color,
         notes,
+        jump_host_id: jumpId,
       });
       onSaved(saved);
     } catch (e) {
@@ -143,6 +155,16 @@
           <option value="__new">{creatingGroup ? "Name:" : "New folder..."}</option>
         </select>
       </div>
+    </div>
+
+    <div class="field">
+      <label for="f-jump">Jump via (bastion)</label>
+      <select id="f-jump" bind:value={jumpId}>
+        <option value={null}>Direct connection</option>
+        {#each otherConnections as other (other.id)}
+          <option value={other.id}>{other.name} — {other.username}@{other.host}</option>
+        {/each}
+      </select>
     </div>
 
     {#if groupId === "__new"}
