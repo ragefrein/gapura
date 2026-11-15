@@ -241,17 +241,24 @@ pub fn unlock(
     })
 }
 
-/// Schema migration chain (design doc 2.4). Each step upgrades one version.
-/// Nothing here ever writes an older schema back to disk.
+/// Schema migration chain (design doc 2.4). Each step upgrades one version
+/// and nothing here ever writes an older schema back to disk. New fields
+/// only: serde `#[serde(default)]` fills them in, so every step so far has
+/// been additive and loss-free.
 fn migrate_payload(mut payload: VaultPayload) -> Result<VaultPayload> {
-    match payload.schema_version {
-        SCHEMA_LATEST => Ok(payload),
-        0 => {
-            // Pre-release vaults had no explicit schema marker; treat as v1.
-            payload.schema_version = 1;
-            Ok(payload)
+    loop {
+        match payload.schema_version {
+            SCHEMA_LATEST => return Ok(payload),
+            0 => {
+                // Pre-release vaults had no explicit schema marker; treat as v1.
+                payload.schema_version = 1;
+            }
+            1 => {
+                // v2 added forward_rules and snippets; both serde-defaulted.
+                payload.schema_version = 2;
+            }
+            other => return Err(GapuraError::VaultVersion(other as u8)),
         }
-        other => Err(GapuraError::VaultVersion(other as u8)),
     }
 }
 
@@ -407,6 +414,35 @@ mod tests {
         bytes[last] ^= 0xFF;
         fs::write(&path, &bytes).unwrap();
         assert!(unlock(dir, None, &store).is_err());
+    }
+
+    #[test]
+    fn v1_payload_migrates_to_v2() {
+        let tmp = temp_dir();
+        let dir = tmp.path();
+        let store = MemoryKeyStore::default();
+        setup(dir, VaultMode::Keychain, None, &store).unwrap();
+        let path = vault_path(dir);
+        // Write a payload shaped exactly like schema v1: no forward rules
+        // and no snippets.
+        let stored = store.load().unwrap();
+        let key: [u8; KEY_LEN] = stored.as_slice().try_into().unwrap();
+        let plaintext =
+            br#"{"schema_version":1,"groups":[],"connections":[],"secrets":[],"keys":[]}"#;
+        let nonce = crypto::random_nonce().unwrap();
+        let header = VaultHeader::keychain(nonce);
+        let mut bytes = header.encode();
+        bytes.extend_from_slice(&crypto::encrypt(&key, &nonce, plaintext).unwrap());
+        fs::write(&path, &bytes).unwrap();
+
+        let vault = unlock(dir, None, &store).unwrap();
+        assert_eq!(vault.payload.schema_version, 2);
+        assert!(vault.payload.forward_rules.is_empty());
+        assert!(vault.payload.snippets.is_empty());
+        // Saving writes the current schema back.
+        vault.save().unwrap();
+        let again = unlock(dir, None, &store).unwrap();
+        assert_eq!(again.payload.schema_version, 2);
     }
 
     #[test]

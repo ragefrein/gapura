@@ -11,16 +11,40 @@ use std::time::{Duration, Instant};
 use russh::client::{Handle, Msg};
 use russh::{ChannelMsg, ChannelReadHalf};
 use tokio::sync::mpsc;
+use uuid::Uuid;
 
 use super::backend::ClientHandler;
 use crate::error::{GapuraError, Result};
 
-#[derive(Debug, Clone)]
+/// Not `Clone`: the forward variants own live TCP streams.
+#[derive(Debug)]
 pub enum SessionCommand {
     /// Bytes typed by the user (or pasted) — forwarded to the remote shell.
     Write(Vec<u8>),
     Resize(u32, u32),
     Close,
+    /// A locally accepted TCP connection for a Local forward rule: the actor
+    /// opens a direct-tcpip channel to the rule target and pipes the two
+    /// streams into each other.
+    ForwardChannel {
+        rule_id: Uuid,
+        stream: tokio::net::TcpStream,
+        target_host: String,
+        target_port: u16,
+        originator: String,
+    },
+    /// Ask the server to listen for a Remote forward rule.
+    RemoteListen {
+        rule_id: Uuid,
+        bind_host: String,
+        bind_port: u16,
+    },
+    /// Ask the server to stop listening for a Remote forward rule.
+    RemoteCancel {
+        rule_id: Uuid,
+        bind_host: String,
+        bind_port: u16,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +58,12 @@ pub enum SessionEvent {
     /// Raw terminal output bytes (coalesced).
     Data(Vec<u8>),
     Status(SessionState),
+    /// Outcome of a forwarding request (rule id, success, human message).
+    ForwardStatus {
+        rule_id: Uuid,
+        ok: bool,
+        message: String,
+    },
 }
 
 /// UI/IPC callback invoked from the actor task.
@@ -118,6 +148,64 @@ async fn run_actor(
                         if let Err(e) = write_half.window_change(cols, rows, 0, 0).await {
                             tracing::warn!("window_change failed: {e}");
                         }
+                    }
+                    Some(SessionCommand::ForwardChannel { rule_id, stream, target_host, target_port, originator }) => {
+                        let handle = &handle;
+                        match handle
+                            .channel_open_direct_tcpip(&target_host, target_port as u32, &originator, 0)
+                            .await
+                        {
+                            Ok(channel) => {
+                                tracing::info!(%rule_id, %target_host, target_port, "forward channel opened");
+                                tokio::spawn(async move {
+                                    let mut stream = stream;
+                                    let mut remote = channel.into_stream();
+                                    let _ = tokio::io::copy_bidirectional(&mut stream, &mut remote).await;
+                                });
+                            }
+                            Err(e) => {
+                                let message = format!("server refused the tunnel to {target_host}:{target_port}: {e}");
+                                tracing::warn!(%rule_id, "{message}");
+                                on_event(SessionEvent::ForwardStatus {
+                                    rule_id,
+                                    ok: false,
+                                    message,
+                                });
+                            }
+                        }
+                    }
+                    Some(SessionCommand::RemoteListen { rule_id, bind_host, bind_port }) => {
+                        let handle = &handle;
+                        match handle.tcpip_forward(&bind_host, bind_port as u32).await {
+                            Ok(_assigned) => {
+                                tracing::info!(%rule_id, %bind_host, bind_port, "remote forward listening");
+                                on_event(SessionEvent::ForwardStatus {
+                                    rule_id,
+                                    ok: true,
+                                    message: format!("server listening on {bind_host}:{bind_port}"),
+                                });
+                            }
+                            Err(e) => {
+                                let message = format!("server refused to listen on {bind_host}:{bind_port}: {e}");
+                                tracing::warn!(%rule_id, "{message}");
+                                on_event(SessionEvent::ForwardStatus {
+                                    rule_id,
+                                    ok: false,
+                                    message,
+                                });
+                            }
+                        }
+                    }
+                    Some(SessionCommand::RemoteCancel { rule_id, bind_host, bind_port }) => {
+                        let handle = &handle;
+                        if let Err(e) = handle.cancel_tcpip_forward(&bind_host, bind_port as u32).await {
+                            tracing::warn!(%rule_id, "cancel_tcpip_forward failed: {e}");
+                        }
+                        on_event(SessionEvent::ForwardStatus {
+                            rule_id,
+                            ok: true,
+                            message: format!("server stopped listening on {bind_host}:{bind_port}"),
+                        });
                     }
                 }
             }

@@ -28,6 +28,7 @@
   import SettingsView from "./components/SettingsView.svelte";
   import KeysView from "./components/KeysView.svelte";
   import ImportReview from "./components/ImportReview.svelte";
+  import Forwards from "./components/Forwards.svelte";
   import Toasts from "./components/Toasts.svelte";
 
   interface HostKeyMismatch {
@@ -47,6 +48,7 @@
   let confirmDelete = $state<Connection | null>(null);
   let hostKeyMismatch = $state<HostKeyMismatch | null>(null);
   let importOpen = $state(false);
+  let forwardsTarget = $state<Connection | null>(null);
   let bootstrapped = $state(false);
   let checking = $state(false);
 
@@ -336,6 +338,7 @@
       onNewConnection={() => (formTarget = { open: true, connection: null, prefill: null })}
       onImport={() => (importOpen = true)}
       onCheckStatus={() => void refreshStatus()}
+      onForwards={(connection) => (forwardsTarget = connection)}
       checking={checking}
       onLock={() => {
         void api.vaultLock().then(() => window.location.reload());
@@ -409,6 +412,10 @@
     onUpdate={acceptNewHostKey}
     onCancel={() => (hostKeyMismatch = null)}
   />
+{/if}
+
+{#if forwardsTarget}
+  <Forwards connection={forwardsTarget} onClose={() => (forwardsTarget = null)} />
 {/if}
 
 {#if importOpen}

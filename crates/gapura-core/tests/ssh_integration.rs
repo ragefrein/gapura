@@ -24,6 +24,7 @@ use rand_core::UnwrapErr;
 use russh::server::{Auth, Handler, Msg};
 use russh::{ChannelId, CryptoVec};
 use ssh_key::{HashAlg, PrivateKey};
+use std::collections::HashMap;
 
 const TEST_USER: &str = "gapura-tester";
 const TEST_PASSWORD: &str = "a-test-password-9";
@@ -203,6 +204,7 @@ async fn connect_to(
             auth,
         },
         known_hosts,
+        Arc::new(Mutex::new(HashMap::new())),
     )
     .await
 }
@@ -228,6 +230,7 @@ async fn wait_for_output(
                     return collected;
                 }
             }
+            Ok(Some(SessionEvent::ForwardStatus { .. })) => {}
             Ok(Some(SessionEvent::Status(_))) | Ok(None) | Err(_) => return collected,
         }
     }
@@ -478,6 +481,7 @@ async fn real_sshd_session_if_available() {
             },
         },
         known,
+        Arc::new(Mutex::new(HashMap::new())),
     )
     .await
     .expect("connect to the real sshd");

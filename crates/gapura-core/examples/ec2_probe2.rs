@@ -5,6 +5,7 @@
 use gapura_core::ssh::backend::{connect, ConnectParams, ResolvedAuth};
 use gapura_core::ssh::known_hosts::KnownHosts;
 use gapura_core::ssh::session::{start_session, SessionCommand, SessionEvent};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -31,6 +32,7 @@ async fn main() {
             },
         },
         known,
+        Arc::new(Mutex::new(HashMap::new())),
     )
     .await
     .expect("connect");
@@ -87,6 +89,12 @@ async fn main() {
                     (std::time::Instant::now() - start).as_millis()
                 );
                 break;
+            }
+            Ok(Some(SessionEvent::ForwardStatus { ok, message, .. })) => {
+                println!(
+                    "[{:>5}ms] FORWARD ({ok}): {message}",
+                    (std::time::Instant::now() - start).as_millis()
+                );
             }
             Ok(None) => break,
             Err(_) => break,

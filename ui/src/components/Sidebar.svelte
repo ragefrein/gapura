@@ -11,6 +11,7 @@
     Pencil,
     Trash2,
     Activity,
+    ArrowRightLeft,
   } from "@lucide/svelte";
   import type { Connection } from "../ipc";
   import {
@@ -31,6 +32,7 @@
     onImport,
     onLock,
     onCheckStatus,
+    onForwards,
     checking,
   }: {
     onConnect: (connection: Connection) => void;
@@ -40,6 +42,7 @@
     onImport: () => void;
     onLock: () => void;
     onCheckStatus: () => void;
+    onForwards: (connection: Connection) => void;
     checking: boolean;
   } = $props();
 
@@ -212,6 +215,16 @@
       ></span>
     {/if}
     <span class="actions">
+      <button
+        class="icon-btn"
+        title="Port forwards"
+        onclick={(e) => {
+          e.stopPropagation();
+          onForwards(connection);
+        }}
+      >
+        <ArrowRightLeft size={13} />
+      </button>
       <button
         class="icon-btn"
         title="Edit"

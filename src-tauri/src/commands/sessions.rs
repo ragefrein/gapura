@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use base64::Engine;
 use gapura_core::model::{AuthMethod, Connection};
+use gapura_core::ssh::backend::RemoteForwardRegistry;
 use gapura_core::ssh::backend::{connect, ConnectParams, ResolvedAuth};
 use gapura_core::ssh::session::{
     start_session, EventSink, SessionCommand, SessionEvent, SessionState,
@@ -13,6 +14,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Runtime, State};
 use uuid::Uuid;
 
+use crate::commands::forwards;
 use crate::error::CommandResult;
 use crate::state::{AppState, SessionEntry};
 
@@ -184,7 +186,8 @@ async fn open_and_register<R: Runtime>(
     };
 
     let known_hosts = Arc::clone(&state.known_hosts);
-    let outcome = connect(params, known_hosts).await?;
+    let remote_forwards: RemoteForwardRegistry = Default::default();
+    let outcome = connect(params, known_hosts, Arc::clone(&remote_forwards)).await?;
 
     if outcome.new_host_key {
         let _ = app.emit(
@@ -211,8 +214,12 @@ async fn open_and_register<R: Runtime>(
         SessionEntry {
             connection_id,
             commands,
+            remote_forwards,
         },
     );
+
+    // Start enabled auto-start rules (PRD F12) once the session is live.
+    forwards::autostart_forwards(state, session_id, connection_id).await;
 
     Ok(SessionInfo {
         id: session_id,
@@ -276,6 +283,20 @@ fn event_sink<R: Runtime>(app: AppHandle<R>, session_id: Uuid) -> EventSink {
                 serde_json::json!({
                     "id": session_id,
                     "state": state_json,
+                }),
+            );
+        }
+        SessionEvent::ForwardStatus {
+            rule_id,
+            ok,
+            message,
+        } => {
+            let _ = app.emit(
+                "forward:status",
+                serde_json::json!({
+                    "rule_id": rule_id,
+                    "ok": ok,
+                    "message": message,
                 }),
             );
         }

@@ -50,7 +50,8 @@ pub async fn check_connection_status(
 /// Pure passthrough so the UI can prefill the connection form from an ssh
 /// command line without reimplementing the parser.
 #[tauri::command]
-pub fn parse_ssh_command_text(text: String) -> CommandResult<gapura_core::quick_connect::SshCommandDraft> {
-    gapura_core::quick_connect::parse_ssh_command(&text)
-        .map_err(|e| GapuraError::Other(e))
+pub fn parse_ssh_command_text(
+    text: String,
+) -> CommandResult<gapura_core::quick_connect::SshCommandDraft> {
+    gapura_core::quick_connect::parse_ssh_command(&text).map_err(GapuraError::Other)
 }

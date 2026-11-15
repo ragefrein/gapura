@@ -4,6 +4,7 @@
 
 use gapura_core::ssh::backend::{connect, ConnectParams, ResolvedAuth};
 use gapura_core::ssh::known_hosts::KnownHosts;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -30,6 +31,7 @@ async fn main() {
             },
         },
         known,
+        Arc::new(Mutex::new(HashMap::new())),
     )
     .await
     .expect("connect");
