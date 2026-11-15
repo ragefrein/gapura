@@ -1,12 +1,13 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { SquareTerminal } from "@lucide/svelte";
-  import { api, isIpcError, listen, type Connection, type Theme } from "./ipc";
+  import { api, isIpcError, listen, type Connection, type SshCommandDraft, type Theme } from "./ipc";
   import {
     activeSessionId,
     activeView,
     connections,
     groups,
+    hostStatuses,
     markSessionState,
     pushToast,
     sessions,
@@ -38,14 +39,16 @@
   }
 
   let paletteOpen = $state(false);
-  let formTarget = $state<{ open: boolean; connection: Connection | null }>({
+  let formTarget = $state<{ open: boolean; connection: Connection | null; prefill: SshCommandDraft | null }>({
     open: false,
     connection: null,
+    prefill: null,
   });
   let confirmDelete = $state<Connection | null>(null);
   let hostKeyMismatch = $state<HostKeyMismatch | null>(null);
   let importOpen = $state(false);
   let bootstrapped = $state(false);
+  let checking = $state(false);
 
   /** Full-screen states: first-run wizard and the locked vault. */
   let stage = $derived.by(() => {
@@ -69,6 +72,36 @@
     try {
       connections.set(await api.listConnections());
       groups.set(await api.listGroups());
+      await refreshStatus();
+    } catch (e) {
+      pushToast("error", describe(e));
+    }
+  }
+
+  async function refreshStatus() {
+    if ($connections.length === 0) return;
+    checking = true;
+    try {
+      const results = await api.checkConnectionStatus($connections.map((c) => c.id));
+      const next: Record<string, { up: boolean; latency_ms: number | null; checked_at: number }> = {};
+      for (const r of results) {
+        next[r.connection_id] = { up: r.up, latency_ms: r.latency_ms, checked_at: Date.now() };
+      }
+      hostStatuses.set(next);
+    } catch (e) {
+      pushToast("error", describe(e));
+    } finally {
+      checking = false;
+    }
+  }
+
+  async function quickConnect(text: string) {
+    try {
+      const draft = await api.parseSshCommand(text);
+      if (draft.warnings.length) {
+        pushToast("info", draft.warnings.join(" · "));
+      }
+      formTarget = { open: true, connection: null, prefill: draft };
     } catch (e) {
       pushToast("error", describe(e));
     }
@@ -166,7 +199,7 @@
   // ---- misc actions --------------------------------------------------------
 
   async function saveFromForm(saved: Connection) {
-    formTarget = { open: false, connection: null };
+    formTarget = { open: false, connection: null, prefill: null };
     await refreshConnections();
     pushToast("info", `Saved "${saved.name}"`);
   }
@@ -224,7 +257,7 @@
       pushToast("info", `Host key pinned for ${event.payload.host}`);
     }).then((off) => unlisteners.push(off));
 
-    const onNew = () => (formTarget = { open: true, connection: null });
+    const onNew = () => (formTarget = { open: true, connection: null, prefill: null });
     const onToggleTheme = () => toggleTheme();
     const onCloseSession = (event: Event) =>
       void closeSession((event as CustomEvent<string>).detail);
@@ -298,10 +331,12 @@
         activeView.set("terminal");
         void connect(connection);
       }}
-      onEdit={(connection) => (formTarget = { open: true, connection })}
+      onEdit={(connection) => (formTarget = { open: true, connection, prefill: null })}
       onDelete={(connection) => (confirmDelete = connection)}
-      onNewConnection={() => (formTarget = { open: true, connection: null })}
+      onNewConnection={() => (formTarget = { open: true, connection: null, prefill: null })}
       onImport={() => (importOpen = true)}
+      onCheckStatus={() => void refreshStatus()}
+      checking={checking}
       onLock={() => {
         void api.vaultLock().then(() => window.location.reload());
       }}
@@ -342,6 +377,7 @@
 {#if paletteOpen}
   <CommandPalette
     onConnect={(connection) => void connect(connection)}
+    onQuickConnect={(text) => void quickConnect(text)}
     onClose={() => (paletteOpen = false)}
   />
 {/if}
@@ -349,7 +385,8 @@
 {#if formTarget.open}
   <ConnectionForm
     connection={formTarget.connection}
-    onClose={() => (formTarget = { open: false, connection: null })}
+    prefill={formTarget.prefill}
+    onClose={() => (formTarget = { open: false, connection: null, prefill: null })}
     onSaved={saveFromForm}
   />
 {/if}

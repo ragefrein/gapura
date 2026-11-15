@@ -44,6 +44,15 @@ export interface Toast {
 
 export const toasts = writable<Toast[]>([]);
 
+/** Reachability results per connection id (F15). */
+export interface HostStatus {
+  up: boolean;
+  latency_ms: number | null;
+  checked_at: number;
+}
+
+export const hostStatuses = writable<Record<string, HostStatus>>({});
+
 let toastSeq = 0;
 
 export function pushToast(kind: Toast["kind"], message: string) {

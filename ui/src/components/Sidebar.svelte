@@ -10,9 +10,17 @@
     Terminal,
     Pencil,
     Trash2,
+    Activity,
   } from "@lucide/svelte";
   import type { Connection } from "../ipc";
-  import { connections, groups, activeView, sessions, type SessionTab } from "../stores";
+  import {
+    connections,
+    groups,
+    activeView,
+    hostStatuses,
+    sessions,
+    type SessionTab,
+  } from "../stores";
   import { fuzzyFilter } from "../fuzzy";
 
   let {
@@ -22,6 +30,8 @@
     onNewConnection,
     onImport,
     onLock,
+    onCheckStatus,
+    checking,
   }: {
     onConnect: (connection: Connection) => void;
     onEdit: (connection: Connection) => void;
@@ -29,6 +39,8 @@
     onNewConnection: () => void;
     onImport: () => void;
     onLock: () => void;
+    onCheckStatus: () => void;
+    checking: boolean;
   } = $props();
 
   let query = $state("");
@@ -137,6 +149,14 @@
       </button>
       <button
         class="icon-btn"
+        class:busy={checking}
+        title={checking ? "Checking reachability..." : "Check reachability"}
+        onclick={onCheckStatus}
+      >
+        <Activity size={16} />
+      </button>
+      <button
+        class="icon-btn"
         title="Keys"
         onclick={() => activeView.set("keys")}
       >
@@ -173,6 +193,16 @@
     <span class="name" title={`${connection.username}@${connection.host}:${connection.port}`}>
       {connection.name}
     </span>
+    {#if $hostStatuses[connection.id]}
+      <span
+        class="status-dot"
+        class:up={$hostStatuses[connection.id].up}
+        class:down={!$hostStatuses[connection.id].up}
+        title={$hostStatuses[connection.id].up
+          ? `reachable — ${$hostStatuses[connection.id].latency_ms} ms`
+          : "unreachable"}
+      ></span>
+    {/if}
     {#if live}
       <span
         class="live-dot"
@@ -413,5 +443,31 @@
   .tools {
     display: flex;
     gap: 2px;
+  }
+
+  .icon-btn.busy :global(svg) {
+    animation: spin 1.2s linear infinite;
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  .status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex: none;
+    background: var(--text-faint);
+  }
+
+  .status-dot.up {
+    background: var(--accent);
+  }
+
+  .status-dot.down {
+    background: var(--danger);
   }
 </style>

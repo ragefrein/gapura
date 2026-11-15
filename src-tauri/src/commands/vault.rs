@@ -89,9 +89,12 @@ pub async fn vault_unlock(
         }),
     )
     .await
-    .map_err(|_| GapuraError::Keychain(
-        "the system keychain did not answer within 30 seconds — is the login keyring unlocked?".into(),
-    ))
+    .map_err(|_| {
+        GapuraError::Keychain(
+            "the system keychain did not answer within 30 seconds — is the login keyring unlocked?"
+                .into(),
+        )
+    })
     .and_then(|inner| inner.map_err(|e| GapuraError::Other(format!("unlock task failed: {e}"))));
 
     match result {

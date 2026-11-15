@@ -1,16 +1,18 @@
 <script lang="ts">
   import { Eye, EyeOff } from "@lucide/svelte";
   import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
-  import { api, type Connection } from "../ipc";
+  import { api, type Connection, type SshCommandDraft } from "../ipc";
   import { groups, pushToast } from "../stores";
   import Modal from "./Modal.svelte";
 
   let {
     connection,
+    prefill,
     onClose,
     onSaved,
   }: {
     connection: Connection | null;
+    prefill: SshCommandDraft | null;
     onClose: () => void;
     onSaved: (connection: Connection) => void;
   } = $props();
@@ -26,23 +28,25 @@
     "#64748b",
   ];
 
-  // The form intentionally captures the connection as it was when opened.
+  // The form intentionally captures the connection as it was when opened,
+  // either an existing connection or a draft parsed from an ssh command.
   // svelte-ignore state_referenced_locally
-  let name = $state(connection?.name ?? "");
+  let name = $state(connection?.name ?? prefill?.host ?? "");
   // svelte-ignore state_referenced_locally
-  let host = $state(connection?.host ?? "");
+  let host = $state(connection?.host ?? prefill?.host ?? "");
   // svelte-ignore state_referenced_locally
-  let port = $state(connection?.port ?? 22);
+  let port = $state(connection?.port ?? prefill?.port ?? 22);
   // svelte-ignore state_referenced_locally
-  let username = $state(connection?.username ?? "");
+  let username = $state(connection?.username ?? prefill?.username ?? "");
   // svelte-ignore state_referenced_locally
   let authKind = $state<"agent" | "password" | "key_file">(
-    connection?.auth.kind ?? "agent",
+    prefill?.identity_path ? "key_file" : (connection?.auth.kind ?? "agent"),
   );
   let password = $state("");
   // svelte-ignore state_referenced_locally
   let keyPath = $state(
-    connection?.auth.kind === "key_file" ? connection.auth.data.path : "",
+    prefill?.identity_path ??
+      (connection?.auth.kind === "key_file" ? connection.auth.data.path : ""),
   );
   let keyPassphrase = $state("");
   // svelte-ignore state_referenced_locally

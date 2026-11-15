@@ -66,6 +66,8 @@ pub fn run() {
             commands::keys::register_key,
             commands::keys::delete_key,
             // import
+            commands::status::check_connection_status,
+            commands::status::parse_ssh_command_text,
             commands::import::import_ssh_config,
             commands::import::commit_import,
             commands::import::preview_import,

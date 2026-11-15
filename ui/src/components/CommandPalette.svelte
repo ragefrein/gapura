@@ -14,9 +14,11 @@
 
   let {
     onConnect,
+    onQuickConnect,
     onClose,
   }: {
     onConnect: (connection: Connection) => void;
+    onQuickConnect: (text: string) => void;
     onClose: () => void;
   } = $props();
 
@@ -79,6 +81,18 @@
     },
   ];
 
+  // Typing an ssh command offers one-click connection creation.
+  const quickConnectAction = $derived.by(() => {
+    const q = query.trim();
+    if (q.length < 5 || !q.toLowerCase().startsWith("ssh")) return null;
+    return {
+      id: "quick-connect",
+      label: `Create connection from: ${q}`,
+      icon: Plus,
+      run: () => onQuickConnect(q),
+    };
+  });
+
   const matchedConnections = $derived(
     query.trim()
       ? fuzzyFilter($connections, (c) => `${c.name} ${c.host} ${c.username}`, query)
@@ -91,6 +105,7 @@
 
   const flatResults = $derived.by(() => {
     const results: Array<{ type: "connection"; value: Connection } | { type: "action"; value: Action }> = [];
+    if (quickConnectAction) results.push({ type: "action", value: quickConnectAction });
     for (const c of matchedConnections) results.push({ type: "connection", value: c });
     for (const a of matchedActions) results.push({ type: "action", value: a });
     return results;
@@ -152,6 +167,20 @@
     </div>
 
     <div class="results">
+      {#if quickConnectAction}
+        <button
+          class="result"
+          class:selected={selected === 0}
+          onclick={() => {
+            void quickConnectAction.run();
+            onClose();
+          }}
+          onmousemove={() => (selected = 0)}
+        >
+          <span class="icon"><quickConnectAction.icon size={14} /></span>
+          <span class="label">{quickConnectAction.label}</span>
+        </button>
+      {/if}
       {#if matchedConnections.length}
         <p class="section">Connections</p>
         {#each matchedConnections as connection, i (connection.id)}
