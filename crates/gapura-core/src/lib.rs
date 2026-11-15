@@ -15,8 +15,10 @@ pub mod error;
 pub mod import_ssh_config;
 pub mod model;
 pub mod paths;
+pub mod quick_connect;
 pub mod settings;
 pub mod ssh;
+pub mod status;
 pub mod vault;
 
 pub use error::{GapuraError, Result};

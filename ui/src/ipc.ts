@@ -101,6 +101,20 @@ export interface ConnectionInput {
   notes: string;
 }
 
+export interface SshCommandDraft {
+  username: string | null;
+  host: string;
+  port: number | null;
+  identity_path: string | null;
+  warnings: string[];
+}
+
+export interface ConnectionStatus {
+  connection_id: string;
+  up: boolean;
+  latency_ms: number | null;
+}
+
 export interface AppPaths {
   data_dir: string;
   config_dir: string;
@@ -166,6 +180,11 @@ export const api = {
 
   listKnownHosts: () => invoke<KnownHostEntry[]>("list_known_hosts"),
   removeKnownHost: (hostPort: string) => invoke<boolean>("remove_known_host", { hostPort }),
+
+  checkConnectionStatus: (ids: string[]) =>
+    invoke<ConnectionStatus[]>("check_connection_status", { ids }),
+  parseSshCommand: (text: string) =>
+    invoke<SshCommandDraft>("parse_ssh_command_text", { text }),
 
   appPaths: () => invoke<AppPaths>("app_paths"),
   openDataDir: () => invoke<void>("open_data_dir"),

@@ -5,4 +5,5 @@ pub mod import;
 pub mod keys;
 pub mod misc;
 pub mod sessions;
+pub mod status;
 pub mod vault;

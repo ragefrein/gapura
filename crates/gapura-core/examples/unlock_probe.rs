@@ -1,7 +1,10 @@
 //! Runs the exact vault unlock path the app uses, without the UI.
 //! Run: cargo run -p gapura-core --example unlock_probe
 
-use gapura_core::vault::{self, keychain::{KeyStore, KeychainEntryRef, OsKeychain}};
+use gapura_core::vault::{
+    self,
+    keychain::{KeychainEntryRef, OsKeychain},
+};
 use std::time::Instant;
 
 fn main() {
@@ -15,6 +18,10 @@ fn main() {
             v.payload.connections.len(),
             v.mode().as_str()
         ),
-        Err(e) => println!("unlock FAILED after {:?}: {e} (code {})", start.elapsed(), e.code()),
+        Err(e) => println!(
+            "unlock FAILED after {:?}: {e} (code {})",
+            start.elapsed(),
+            e.code()
+        ),
     }
 }
