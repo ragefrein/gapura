@@ -66,7 +66,11 @@
         </button>
       </form>
     {:else}
-      <p class="hint">Unlocking from the system keychain...</p>
+      <p class="hint">Unlocking from the system keychain... If nothing happens for a
+      while, the keyring may be locked — retry after unlocking it.</p>
+      <button class="btn" disabled={busy} onclick={retryKeychain}>
+        {busy ? "Unlocking..." : "Retry"}
+      </button>
     {/if}
 
     {#if error}<p class="error-text">{error}</p>{/if}

@@ -22,8 +22,21 @@ pub struct VaultStatus {
 pub fn vault_status(state: tauri::State<'_, AppState>) -> VaultStatus {
     let exists = vault::vault_exists(&state.data_dir);
     let unlocked = state.vault.read().map(|g| g.is_some()).unwrap_or(false);
-    let mode = state.vault_mode().map(|m| m.as_str().to_string());
-    let keychain_error = state.keychain_error.lock().ok().and_then(|mut e| e.take());
+    // When locked, the in-memory vault is None — the mode must come from the
+    // file header instead, or the UI can never decide how to unlock.
+    let mode = if unlocked {
+        state.vault_mode().map(|m| m.as_str().to_string())
+    } else {
+        vault::peek_mode(&state.data_dir)
+            .ok()
+            .flatten()
+            .map(|m| m.as_str().to_string())
+    };
+    let keychain_error = state
+        .keychain_error
+        .lock()
+        .ok()
+        .and_then(|slot| slot.clone());
     VaultStatus {
         exists,
         unlocked,
@@ -66,14 +79,24 @@ pub async fn vault_unlock(
 ) -> CommandResult<()> {
     let store = keychain_store();
     let data_dir = state.data_dir.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        vault::unlock(&data_dir, passphrase.as_deref(), &store)
-    })
+    tracing::info!("vault unlock requested");
+    // The Secret Service can stall when the login keyring is locked; give it
+    // a bounded window instead of leaving the UI hanging forever.
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        tauri::async_runtime::spawn_blocking(move || {
+            vault::unlock(&data_dir, passphrase.as_deref(), &store)
+        }),
+    )
     .await
-    .map_err(|e| GapuraError::Other(format!("unlock task failed: {e}")));
+    .map_err(|_| GapuraError::Keychain(
+        "the system keychain did not answer within 30 seconds — is the login keyring unlocked?".into(),
+    ))
+    .and_then(|inner| inner.map_err(|e| GapuraError::Other(format!("unlock task failed: {e}"))));
 
     match result {
         Ok(Ok(vault)) => {
+            tracing::info!("vault unlocked");
             let mut guard = state
                 .vault
                 .write()
@@ -82,12 +105,11 @@ pub async fn vault_unlock(
             Ok(())
         }
         Ok(Err(e)) => {
-            // Surface keychain failures distinctly so the UI can explain
-            // them (design doc section 2.3).
-            if let GapuraError::Keychain(msg) = &e {
-                if let Ok(mut slot) = state.keychain_error.lock() {
-                    *slot = Some(msg.clone());
-                }
+            // Every unlock failure is surfaced to the UI; the locked screen
+            // must never show a bare spinner with no way forward.
+            tracing::warn!(code = e.code(), "vault unlock failed: {e}");
+            if let Ok(mut slot) = state.keychain_error.lock() {
+                *slot = Some(e.to_string());
             }
             Err(e)
         }
