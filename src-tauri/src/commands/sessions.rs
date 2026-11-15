@@ -187,18 +187,11 @@ async fn open_and_register<R: Runtime>(
 
     let known_hosts = Arc::clone(&state.known_hosts);
     let remote_forwards: RemoteForwardRegistry = Default::default();
-    let hops = resolve_jump_chain(state, connection.id)?;
-    let outcome = if hops.is_empty() {
-        connect(params, known_hosts, Arc::clone(&remote_forwards)).await?
-    } else {
-        gapura_core::ssh::backend::connect_with_jump(
-            &hops,
-            &params,
-            known_hosts,
-            Arc::clone(&remote_forwards),
-        )
-        .await?
-    };
+    // TODO(F13): jump chains are implemented in core (connect_with_jump) but
+    // disabled at the app layer pending investigation of a corrupted
+    // handshake over the direct-tcpip tunnel (see feat/jump-snippets notes).
+    let _ = &resolve_jump_chain;
+    let outcome = connect(params, known_hosts, Arc::clone(&remote_forwards)).await?;
 
     if outcome.new_host_key {
         let _ = app.emit(

@@ -13,10 +13,11 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use gapura_core::error::GapuraError;
 use gapura_core::model::AuthMethod;
-use gapura_core::ssh::backend::{connect, ConnectParams, ResolvedAuth};
+use gapura_core::ssh::backend::{connect, connect_with_jump, ConnectParams, ResolvedAuth};
 use gapura_core::ssh::keys::generate_ed25519;
 use gapura_core::ssh::known_hosts::{KnownHostEntry, KnownHosts};
 use gapura_core::ssh::session::{start_session, SessionCommand, SessionEvent, SessionState};
@@ -57,6 +58,9 @@ fn server_config(host_key: PrivateKey) -> Arc<russh::server::Config> {
 #[derive(Clone)]
 struct EchoHandler {
     authorized_fp: Option<Arc<String>>,
+    /// Channel ids that had a shell requested; direct-tcpip tunnels must NOT
+    /// be echoed or the client's handshake through them gets corrupted.
+    shell_channels: Arc<Mutex<std::collections::HashSet<ChannelId>>>,
 }
 
 impl Handler for EchoHandler {
@@ -110,12 +114,65 @@ impl Handler for EchoHandler {
         }
     }
 
+    async fn channel_open_direct_tcpip(
+        &mut self,
+        channel: russh::Channel<Msg>,
+        address_to_connect: &str,
+        port_to_connect: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: russh::server::ChannelOpenHandle,
+        _session: &mut russh::server::Session,
+    ) -> Result<(), Self::Error> {
+        reply.accept().await;
+        let address_to_connect = address_to_connect.to_string();
+        tokio::spawn(async move {
+            let mut tunnel = channel.into_stream();
+            let mut target =
+                match tokio::net::TcpStream::connect((address_to_connect, port_to_connect as u16))
+                    .await
+                {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!("direct-tcpip target unreachable: {e}");
+                        return;
+                    }
+                };
+            // Log the initial handshake exchange, then splice the streams.
+            let mut tunnel = tunnel;
+            let mut target = target;
+            let mut buf = vec![0u8; 64];
+            let n = tunnel.read(&mut buf).await.unwrap_or(0);
+            eprintln!("[pipe] client hello: {:?}", &buf[..n.min(30)]);
+            target.write_all(&buf[..n]).await.unwrap();
+            let n = target.read(&mut buf).await.unwrap_or(0);
+            eprintln!("[pipe] target hello: {:?}", &buf[..n.min(30)]);
+            tunnel.write_all(&buf[..n]).await.unwrap();
+            loop {
+                let n = tunnel.read(&mut buf).await.unwrap_or(0);
+                eprintln!("[pipe] client->target {} bytes: {:?}", n, &buf[..n.min(40)]);
+                if n == 0 {
+                    return;
+                }
+                target.write_all(&buf[..n]).await.unwrap();
+                let n = target.read(&mut buf).await.unwrap_or(0);
+                eprintln!("[pipe] target->client {} bytes: {:?}", n, &buf[..n.min(40)]);
+                if n == 0 {
+                    return;
+                }
+                tunnel.write_all(&buf[..n]).await.unwrap();
+            }
+        });
+        Ok(())
+    }
+
     async fn shell_request(
         &mut self,
         channel: ChannelId,
         session: &mut russh::server::Session,
     ) -> Result<(), Self::Error> {
         let _ = session.channel_success(channel);
+        self.shell_channels.lock().unwrap().insert(channel);
         session.data(channel, "Gapura echo shell ready\r\n")?;
         Ok(())
     }
@@ -159,6 +216,7 @@ async fn spawn_echo_server(authorized_fp: Option<String>) -> EchoServer {
     .expect("host key generation cannot fail");
     let handler = EchoHandler {
         authorized_fp: authorized_fp.clone().map(Arc::new),
+        shell_channels: Arc::new(Mutex::new(std::collections::HashSet::new())),
     };
     let config = server_config(host_key.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -446,6 +504,66 @@ async fn known_hosts_persist_between_connections() {
     let host_port = format!("{}:{}", server.addr.ip(), server.addr.port());
     assert_eq!(reloaded.entries()[0].host_port, host_port);
     server.stop();
+}
+
+#[tokio::test]
+async fn jump_chain_reaches_second_server() {
+    // Outer server A tunnels to inner server B; the session must land on B.
+    let server_a = spawn_echo_server(None).await;
+    let server_b = spawn_echo_server(None).await;
+    let (_tmp, dir) = temp_known_hosts_dir();
+    let known = Arc::new(Mutex::new(KnownHosts::load(&dir).unwrap()));
+
+    let hops = vec![ConnectParams {
+        host: server_a.addr.ip().to_string(),
+        port: server_a.addr.port(),
+        username: TEST_USER.into(),
+        auth: ResolvedAuth::Password {
+            password: TEST_PASSWORD.into(),
+        },
+    }];
+    let outcome = connect_with_jump(
+        &hops,
+        &ConnectParams {
+            host: server_b.addr.ip().to_string(),
+            port: server_b.addr.port(),
+            username: TEST_USER.into(),
+            auth: ResolvedAuth::Password {
+                password: TEST_PASSWORD.into(),
+            },
+        },
+        known,
+        Arc::new(Mutex::new(HashMap::new())),
+    )
+    .await
+    .expect("jump connect lands on B");
+    assert!(outcome.fingerprint.starts_with("SHA256:"));
+
+    let (tx, mut rx) = events_channel();
+    let sink = Arc::new(move |event| {
+        let _ = tx.send(event);
+    });
+    let commands = start_session(outcome.handle, 80, 24, sink).await.unwrap();
+
+    let banner = wait_for_output(&mut rx, "echo shell ready", Duration::from_secs(10)).await;
+    assert!(
+        banner.contains("Gapura echo shell ready"),
+        "got: {banner:?}"
+    );
+
+    commands
+        .send(SessionCommand::Write(b"jumped\n".to_vec()))
+        .await
+        .unwrap();
+    let echoed = wait_for_output(&mut rx, "ECHO: jumped", Duration::from_secs(10)).await;
+    assert!(echoed.contains("ECHO: jumped"), "got: {echoed:?}");
+
+    // Both hops got pinned in the same known-hosts file.
+    let hosts = KnownHosts::load(&dir).unwrap();
+    assert_eq!(hosts.entries().len(), 2);
+
+    server_a.stop();
+    server_b.stop();
 }
 
 // ---------------------------------------------------------------------------
