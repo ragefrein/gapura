@@ -64,6 +64,7 @@ pub async fn start_session(
         .await
         .map_err(GapuraError::from)?;
 
+    tracing::info!(%cols, %rows, "session actor starting (pty requested)");
     let (commands, command_rx) = mpsc::channel::<SessionCommand>(64);
     tokio::spawn(run_actor(handle, channel, command_rx, on_event));
     Ok(commands)
@@ -113,8 +114,9 @@ async fn run_actor(
                         }
                     }
                     Some(SessionCommand::Resize(cols, rows)) => {
+                        tracing::info!(cols, rows, "pty resize requested");
                         if let Err(e) = write_half.window_change(cols, rows, 0, 0).await {
-                            tracing::debug!("window_change failed: {e}");
+                            tracing::warn!("window_change failed: {e}");
                         }
                     }
                 }
@@ -122,6 +124,7 @@ async fn run_actor(
             msg = msg_rx.recv() => {
                 match msg {
                     None => {
+                        tracing::info!("channel reader ended");
                         if reason.is_none() {
                             reason = Some("connection lost".into());
                         }
@@ -135,6 +138,7 @@ async fn run_actor(
                         }
                     }
                     Some(ChannelMsg::ExitStatus { exit_status }) => {
+                        tracing::info!(exit_status, "remote shell reported exit status");
                         exit_code = Some(exit_status);
                     }
                     Some(ChannelMsg::Close) => {

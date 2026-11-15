@@ -131,6 +131,7 @@ pub async fn session_resize(
 
 #[tauri::command]
 pub async fn session_close(state: State<'_, AppState>, session_id: Uuid) -> CommandResult<()> {
+    tracing::info!(session = %session_id, "session close requested by UI");
     send_command(&state, &session_id, SessionCommand::Close).await?;
     let _ = state.take_session(&session_id);
     Ok(())
@@ -196,6 +197,12 @@ async fn open_and_register<R: Runtime>(
     }
 
     let session_id = reuse_session_id.unwrap_or_else(Uuid::new_v4);
+    tracing::info!(
+        session = %session_id,
+        host = %connection.host,
+        reconnect = reuse_session_id.is_some(),
+        "session opened"
+    );
     let sink = event_sink(app.clone(), session_id);
     let commands = start_session(outcome.handle, cols, rows, sink).await?;
 
