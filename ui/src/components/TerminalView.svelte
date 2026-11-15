@@ -3,7 +3,6 @@
   import { Terminal } from "@xterm/xterm";
   import { FitAddon } from "@xterm/addon-fit";
   import { SearchAddon } from "@xterm/addon-search";
-  import { WebglAddon } from "@xterm/addon-webgl";
   import { Unicode11Addon } from "@xterm/addon-unicode11";
   import { Search, RefreshCw, WifiOff, X, ArrowUp, ArrowDown } from "@lucide/svelte";
   import "@xterm/xterm/css/xterm.css";
@@ -88,16 +87,6 @@
     t.loadAddon(searchAddon);
     t.loadAddon(new Unicode11Addon());
     t.unicode.activeVersion = "unicode11";
-
-    try {
-      const webgl = new WebglAddon();
-      // A lost GL context renders as a black canvas; dropping the addon
-      // switches xterm back to the DOM renderer instead.
-      webgl.onContextLoss(() => webgl.dispose());
-      t.loadAddon(webgl);
-    } catch {
-      // WebGL unavailable (headless, blocked GPU): the DOM renderer is fine.
-    }
 
     registerWriter(session.id, (data) => t.write(data));
 
