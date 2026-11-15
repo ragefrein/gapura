@@ -6,6 +6,7 @@
 
 use std::io::Write;
 use std::path::Path;
+use std::path::PathBuf;
 
 use rand_core::{CryptoRng, UnwrapErr};
 use ssh_key::{Algorithm, HashAlg, LineEnding, PrivateKey};
@@ -27,6 +28,27 @@ fn os_rng() -> impl CryptoRng {
     // view `PrivateKey::random` wants; a failing entropy source is a hard
     // stop, which the panic inside UnwrapErr makes explicit.
     UnwrapErr(getrandom::SysRng)
+}
+
+/// Expand a leading `~` or `$HOME` to the user's home directory. russh and
+/// std do not do this, but humans type `~/.ssh/id_ed25519` every day.
+pub fn expand_home(path: &Path) -> PathBuf {
+    let as_str = path.to_string_lossy();
+    if as_str == "~" || as_str.starts_with("~/") || as_str.starts_with("$HOME/") {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from("."));
+        if as_str == "~" {
+            return home;
+        }
+        let rest = as_str
+            .strip_prefix("~/")
+            .or_else(|| as_str.strip_prefix("$HOME/"))
+            .unwrap();
+        return home.join(rest);
+    }
+    path.to_path_buf()
 }
 
 /// Generate a new ed25519 key pair, write `<path>` (private) and `<path>.pub`
@@ -89,7 +111,8 @@ pub fn generate_ed25519(
 /// Pass the passphrase when the file is encrypted; wrong passphrases surface
 /// as [`GapuraError::WrongPassphrase`].
 pub fn inspect_private_key(path: &Path, passphrase: Option<&str>) -> Result<KeyFileInfo> {
-    let text = std::fs::read_to_string(path).map_err(|e| GapuraError::PathIo {
+    let path = expand_home(path);
+    let text = std::fs::read_to_string(&path).map_err(|e| GapuraError::PathIo {
         path: path.to_path_buf(),
         message: e.to_string(),
     })?;

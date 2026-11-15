@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use russh::client::{self, Handle};
-use russh::keys::{agent::client::AgentClient, load_secret_key, PrivateKeyWithHashAlg};
+use russh::keys::{agent::client::AgentClient, load_secret_key, PrivateKey, PrivateKeyWithHashAlg};
 use ssh_key::{HashAlg, PublicKey};
 
 use super::known_hosts::{HostCheck, KnownHosts};
@@ -208,11 +208,16 @@ async fn authenticate(handle: &mut Handle<ClientHandler>, params: &ConnectParams
             finish_auth(result, params)
         }
         ResolvedAuth::KeyFile { path, passphrase } => {
-            let key = load_secret_key(path, passphrase.as_deref()).map_err(|e| {
+            let path = super::keys::expand_home(path);
+            let key = load_secret_key(&path, passphrase.as_deref()).map_err(|e| {
                 GapuraError::Other(format!("cannot read key {}: {e}", path.display()))
             })?;
+            let hash_alg = preferred_hash_alg(&key);
             let result = handle
-                .authenticate_publickey(username, PrivateKeyWithHashAlg::new(Arc::new(key), None))
+                .authenticate_publickey(
+                    username,
+                    PrivateKeyWithHashAlg::new(Arc::new(key), hash_alg),
+                )
                 .await?;
             finish_auth(result, params)
         }
@@ -237,8 +242,9 @@ async fn agent_auth(handle: &mut Handle<ClientHandler>, username: &str) -> Resul
     let mut last_detail = String::from("the agent refused every key");
     for identity in identities {
         let public_key = identity.public_key().into_owned();
+        let hash_alg = preferred_hash_alg_for_algorithm(public_key.algorithm());
         let result = handle
-            .authenticate_publickey_with(username, public_key, None, &mut agent)
+            .authenticate_publickey_with(username, public_key, hash_alg, &mut agent)
             .await
             .map_err(|e| GapuraError::Ssh(format!("agent error: {e}")))?;
         if result.success() {
@@ -254,6 +260,20 @@ async fn agent_auth(handle: &mut Handle<ClientHandler>, username: &str) -> Resul
         host: String::new(),
         detail: last_detail,
     })
+}
+
+/// RSA keys must sign with `rsa-sha2-256` these days: plain `ssh-rsa`
+/// (SHA-1) is rejected by OpenSSH 8.8+ — and by AWS EC2 hosts. Ed25519 has
+/// its own signature scheme, where the hash parameter stays unused.
+fn preferred_hash_alg(key: &PrivateKey) -> Option<HashAlg> {
+    preferred_hash_alg_for_algorithm(key.algorithm())
+}
+
+fn preferred_hash_alg_for_algorithm(algorithm: ssh_key::Algorithm) -> Option<HashAlg> {
+    match algorithm {
+        ssh_key::Algorithm::Rsa { .. } => Some(HashAlg::Sha256),
+        _ => None,
+    }
 }
 
 fn finish_auth(result: russh::client::AuthResult, params: &ConnectParams) -> Result<()> {
