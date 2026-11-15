@@ -3,7 +3,6 @@
   import { Terminal } from "@xterm/xterm";
   import { FitAddon } from "@xterm/addon-fit";
   import { SearchAddon } from "@xterm/addon-search";
-  import { Unicode11Addon } from "@xterm/addon-unicode11";
   import { Search, RefreshCw, WifiOff, X, ArrowUp, ArrowDown } from "@lucide/svelte";
   import "@xterm/xterm/css/xterm.css";
 
@@ -85,8 +84,6 @@
     t.loadAddon(fitAddon);
     searchAddon = new SearchAddon();
     t.loadAddon(searchAddon);
-    t.loadAddon(new Unicode11Addon());
-    t.unicode.activeVersion = "unicode11";
 
     registerWriter(session.id, (data) => t.write(data));
 
