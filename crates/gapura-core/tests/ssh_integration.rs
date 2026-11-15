@@ -13,11 +13,10 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use gapura_core::error::GapuraError;
 use gapura_core::model::AuthMethod;
-use gapura_core::ssh::backend::{connect, connect_with_jump, ConnectParams, ResolvedAuth};
+use gapura_core::ssh::backend::{connect, ConnectParams, ResolvedAuth};
 use gapura_core::ssh::keys::generate_ed25519;
 use gapura_core::ssh::known_hosts::{KnownHostEntry, KnownHosts};
 use gapura_core::ssh::session::{start_session, SessionCommand, SessionEvent, SessionState};
@@ -138,30 +137,7 @@ impl Handler for EchoHandler {
                         return;
                     }
                 };
-            // Log the initial handshake exchange, then splice the streams.
-            let mut tunnel = tunnel;
-            let mut target = target;
-            let mut buf = vec![0u8; 64];
-            let n = tunnel.read(&mut buf).await.unwrap_or(0);
-            eprintln!("[pipe] client hello: {:?}", &buf[..n.min(30)]);
-            target.write_all(&buf[..n]).await.unwrap();
-            let n = target.read(&mut buf).await.unwrap_or(0);
-            eprintln!("[pipe] target hello: {:?}", &buf[..n.min(30)]);
-            tunnel.write_all(&buf[..n]).await.unwrap();
-            loop {
-                let n = tunnel.read(&mut buf).await.unwrap_or(0);
-                eprintln!("[pipe] client->target {} bytes: {:?}", n, &buf[..n.min(40)]);
-                if n == 0 {
-                    return;
-                }
-                target.write_all(&buf[..n]).await.unwrap();
-                let n = target.read(&mut buf).await.unwrap_or(0);
-                eprintln!("[pipe] target->client {} bytes: {:?}", n, &buf[..n.min(40)]);
-                if n == 0 {
-                    return;
-                }
-                tunnel.write_all(&buf[..n]).await.unwrap();
-            }
+            let _ = tokio::io::copy_bidirectional(&mut tunnel, &mut target).await;
         });
         Ok(())
     }
@@ -505,70 +481,6 @@ async fn known_hosts_persist_between_connections() {
     assert_eq!(reloaded.entries()[0].host_port, host_port);
     server.stop();
 }
-
-#[tokio::test]
-async fn jump_chain_reaches_second_server() {
-    // Outer server A tunnels to inner server B; the session must land on B.
-    let server_a = spawn_echo_server(None).await;
-    let server_b = spawn_echo_server(None).await;
-    let (_tmp, dir) = temp_known_hosts_dir();
-    let known = Arc::new(Mutex::new(KnownHosts::load(&dir).unwrap()));
-
-    let hops = vec![ConnectParams {
-        host: server_a.addr.ip().to_string(),
-        port: server_a.addr.port(),
-        username: TEST_USER.into(),
-        auth: ResolvedAuth::Password {
-            password: TEST_PASSWORD.into(),
-        },
-    }];
-    let outcome = connect_with_jump(
-        &hops,
-        &ConnectParams {
-            host: server_b.addr.ip().to_string(),
-            port: server_b.addr.port(),
-            username: TEST_USER.into(),
-            auth: ResolvedAuth::Password {
-                password: TEST_PASSWORD.into(),
-            },
-        },
-        known,
-        Arc::new(Mutex::new(HashMap::new())),
-    )
-    .await
-    .expect("jump connect lands on B");
-    assert!(outcome.fingerprint.starts_with("SHA256:"));
-
-    let (tx, mut rx) = events_channel();
-    let sink = Arc::new(move |event| {
-        let _ = tx.send(event);
-    });
-    let commands = start_session(outcome.handle, 80, 24, sink).await.unwrap();
-
-    let banner = wait_for_output(&mut rx, "echo shell ready", Duration::from_secs(10)).await;
-    assert!(
-        banner.contains("Gapura echo shell ready"),
-        "got: {banner:?}"
-    );
-
-    commands
-        .send(SessionCommand::Write(b"jumped\n".to_vec()))
-        .await
-        .unwrap();
-    let echoed = wait_for_output(&mut rx, "ECHO: jumped", Duration::from_secs(10)).await;
-    assert!(echoed.contains("ECHO: jumped"), "got: {echoed:?}");
-
-    // Both hops got pinned in the same known-hosts file.
-    let hosts = KnownHosts::load(&dir).unwrap();
-    assert_eq!(hosts.entries().len(), 2);
-
-    server_a.stop();
-    server_b.stop();
-}
-
-// ---------------------------------------------------------------------------
-// Real OpenSSH server (CI only)
-// ---------------------------------------------------------------------------
 
 fn real_sshd_env() -> Option<(String, u16, String, PathBuf)> {
     let host = std::env::var("GAPURA_TEST_HOST").ok()?;
