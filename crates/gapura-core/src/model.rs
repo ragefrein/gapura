@@ -121,6 +121,15 @@ pub struct Connection {
     pub jump_host_id: Option<Uuid>,
     #[serde(default)]
     pub notes: String,
+    /// Pinned connections sort first; the flag is toggled from the sidebar.
+    #[serde(default)]
+    pub pinned: bool,
+    /// Last successful session open, used by the "recent" ordering.
+    #[serde(default)]
+    pub last_connected_at: Option<DateTime<Utc>>,
+    /// Number of successful session opens, shown in the diagnostics report.
+    #[serde(default)]
+    pub connect_count: u32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -202,9 +211,21 @@ pub enum ForwardKind {
 pub struct Snippet {
     pub id: Uuid,
     pub name: String,
+    /// May contain `{{host}}`, `{{user}}`, `{{port}}`, `{{name}}`
+    /// placeholders; see [`crate::snippet::expand_placeholders`].
     pub command: String,
     pub connection_id: Option<Uuid>,
+    /// Ask the user before sending (for destructive commands).
+    #[serde(default)]
+    pub require_confirm: bool,
+    /// Append a newline so the remote shell runs the command.
+    #[serde(default = "default_true")]
+    pub send_enter: bool,
     pub created_at: DateTime<Utc>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -296,6 +317,9 @@ mod tests {
                 color: Some("#14b8a6".into()),
                 jump_host_id: None,
                 notes: "primary replica".into(),
+                pinned: true,
+                last_connected_at: Some(now()),
+                connect_count: 3,
                 created_at: now(),
                 updated_at: now(),
             }],
@@ -347,6 +371,22 @@ mod tests {
     }
 
     #[test]
+    fn snippet_defaults_are_backwards_compatible() {
+        // A snippet stored before send options existed must keep working:
+        // no confirmation prompt, and Enter is pressed.
+        let json = r#"{
+            "id": "00000000-0000-0000-0000-000000000001",
+            "name": "uptime",
+            "command": "uptime",
+            "connection_id": null,
+            "created_at": "2026-01-01T00:00:00Z"
+        }"#;
+        let snippet: Snippet = serde_json::from_str(json).unwrap();
+        assert!(!snippet.require_confirm);
+        assert!(snippet.send_enter);
+    }
+
+    #[test]
     fn remove_secret_if_unused_behaves() {
         let mut payload = VaultPayload::empty();
         let secret_id = Uuid::new_v4();
@@ -368,6 +408,9 @@ mod tests {
             color: None,
             jump_host_id: None,
             notes: String::new(),
+            pinned: false,
+            last_connected_at: None,
+            connect_count: 0,
             created_at: now(),
             updated_at: now(),
         });

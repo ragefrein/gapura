@@ -1,19 +1,22 @@
 //! Session lifecycle commands: open, write, resize, close, reconnect.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use base64::Engine;
+use chrono::Utc;
 use gapura_core::model::{AuthMethod, Connection};
 use gapura_core::ssh::backend::RemoteForwardRegistry;
-use gapura_core::ssh::backend::{connect, ConnectParams, ResolvedAuth};
+use gapura_core::ssh::backend::{connect, test_connect, ConnectParams, ResolvedAuth};
 use gapura_core::ssh::session::{
     start_session, EventSink, SessionCommand, SessionEvent, SessionState,
 };
 use gapura_core::GapuraError;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Runtime, State};
 use uuid::Uuid;
 
+use crate::commands::connections::AuthInput;
 use crate::commands::forwards;
 use crate::error::CommandResult;
 use crate::state::{AppState, SessionEntry};
@@ -71,6 +74,62 @@ pub fn list_sessions(state: tauri::State<'_, AppState>) -> CommandResult<Vec<Ses
         });
     }
     Ok(tabs)
+}
+
+/// Input for the pre-save connection test: same shape as the form.
+#[derive(Debug, Deserialize)]
+pub struct TestConnectionInput {
+    /// Set when editing: lets a blank password/passphrase fall back to the
+    /// secret already stored for that connection.
+    pub id: Option<Uuid>,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub auth: AuthInput,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TestConnectionResult {
+    pub fingerprint: String,
+    pub algorithm: String,
+    pub new_host_key: bool,
+    pub latency_ms: u32,
+}
+
+/// Handshake + authenticate without opening a shell. Proves credentials and
+/// shows the host fingerprint before the connection is saved. First-use host
+/// keys are reported but NOT pinned (see `test_connect` in core).
+#[tauri::command]
+pub async fn test_connection(
+    state: State<'_, AppState>,
+    input: TestConnectionInput,
+) -> CommandResult<TestConnectionResult> {
+    let host = input.host.trim().to_string();
+    if host.is_empty() {
+        return Err(GapuraError::Other("host cannot be empty".into()));
+    }
+    if input.port == 0 {
+        return Err(GapuraError::Other("port must be 1-65535".into()));
+    }
+    let auth = resolve_test_auth(&state, &input)?;
+    let params = ConnectParams {
+        host: host.clone(),
+        port: input.port,
+        username: input.username.trim().to_string(),
+        auth,
+    };
+    let started = Instant::now();
+    let outcome = test_connect(params, Arc::clone(&state.known_hosts)).await?;
+    let latency_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
+    let result = TestConnectionResult {
+        fingerprint: outcome.fingerprint.clone(),
+        algorithm: outcome.algorithm.clone(),
+        new_host_key: outcome.new_host_key,
+        latency_ms,
+    };
+    let _ = outcome.close().await;
+    tracing::info!(%host, port = input.port, latency_ms, "connection test succeeded");
+    Ok(result)
 }
 
 /// Open a session for a connection. The heavy lifting runs on the async
@@ -139,7 +198,7 @@ pub async fn session_close(state: State<'_, AppState>, session_id: Uuid) -> Comm
     Ok(())
 }
 
-async fn send_command(
+pub(crate) async fn send_command(
     state: &AppState,
     session_id: &Uuid,
     command: SessionCommand,
@@ -221,6 +280,9 @@ async fn open_and_register<R: Runtime>(
             remote_forwards,
         },
     );
+
+    // Activity bookkeeping for the "recent" ordering and diagnostics.
+    record_connection_opened(state, connection_id);
 
     // Start enabled auto-start rules (PRD F12) once the session is live.
     forwards::autostart_forwards(state, session_id, connection_id).await;
@@ -307,6 +369,89 @@ fn resolve_auth(
             })
         }
     })
+}
+
+/// Resolve credentials for the pre-save test. A blank password/passphrase
+/// falls back to the secret already attached to the connection being edited.
+fn resolve_test_auth(
+    state: &State<'_, AppState>,
+    input: &TestConnectionInput,
+) -> CommandResult<ResolvedAuth> {
+    match &input.auth {
+        AuthInput::Agent => Ok(ResolvedAuth::Agent),
+        AuthInput::Password { password } => {
+            if let Some(value) = password.as_deref().filter(|p| !p.is_empty()) {
+                return Ok(ResolvedAuth::Password {
+                    password: value.to_string(),
+                });
+            }
+            let stored = stored_secret(state, input.id, |connection| match &connection.auth {
+                AuthMethod::Password { secret_id } => Some(*secret_id),
+                _ => None,
+            })?;
+            stored
+                .map(|password| ResolvedAuth::Password { password })
+                .ok_or_else(|| {
+                    GapuraError::Other("a password is required for password authentication".into())
+                })
+        }
+        AuthInput::KeyFile { path, passphrase } => {
+            if path.trim().is_empty() {
+                return Err(GapuraError::Other("choose a private key file".into()));
+            }
+            let passphrase = match passphrase.as_deref().filter(|p| !p.is_empty()) {
+                Some(value) => Some(value.to_string()),
+                None => stored_secret(state, input.id, |connection| match &connection.auth {
+                    AuthMethod::KeyFile {
+                        passphrase_secret_id,
+                        ..
+                    } => *passphrase_secret_id,
+                    _ => None,
+                })?,
+            };
+            Ok(ResolvedAuth::KeyFile {
+                path: path.into(),
+                passphrase,
+            })
+        }
+    }
+}
+
+/// Fetch a secret referenced by an existing connection, if any.
+fn stored_secret(
+    state: &State<'_, AppState>,
+    connection_id: Option<Uuid>,
+    pick: impl FnOnce(&Connection) -> Option<Uuid>,
+) -> CommandResult<Option<String>> {
+    state.with_vault(|vault| {
+        let value = connection_id
+            .and_then(|id| vault.payload.connection(id))
+            .and_then(pick)
+            .and_then(|secret_id| vault.payload.secret(secret_id))
+            .map(|slot| slot.value.expose().to_string());
+        Ok(value)
+    })
+}
+
+/// Update last-connected activity; failures are non-fatal (the session is
+/// already live and must not be torn down for bookkeeping).
+fn record_connection_opened(state: &State<'_, AppState>, connection_id: Uuid) {
+    let result = state.with_vault_mut(|vault| {
+        if let Some(connection) = vault
+            .payload
+            .connections
+            .iter_mut()
+            .find(|c| c.id == connection_id)
+        {
+            connection.last_connected_at = Some(Utc::now());
+            connection.connect_count = connection.connect_count.saturating_add(1);
+            connection.updated_at = Utc::now();
+        }
+        Ok(())
+    });
+    if let Err(error) = result {
+        tracing::warn!(%connection_id, "cannot record connection activity: {error}");
+    }
 }
 
 fn event_sink<R: Runtime>(app: AppHandle<R>, session_id: Uuid) -> EventSink {

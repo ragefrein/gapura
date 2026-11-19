@@ -49,6 +49,7 @@ pub fn run() {
             // connections & groups
             commands::connections::list_connections,
             commands::connections::save_connection,
+            commands::connections::set_connection_pinned,
             commands::connections::delete_connection,
             commands::connections::list_groups,
             commands::connections::save_group,
@@ -56,6 +57,7 @@ pub fn run() {
             // sessions
             commands::sessions::list_sessions,
             commands::sessions::session_open,
+            commands::sessions::test_connection,
             commands::sessions::session_reconnect,
             commands::sessions::session_write,
             commands::sessions::session_resize,
@@ -77,6 +79,7 @@ pub fn run() {
             commands::snippets::list_snippets,
             commands::snippets::save_snippet,
             commands::snippets::delete_snippet,
+            commands::snippets::run_snippet,
             commands::import::import_ssh_config,
             commands::import::commit_import,
             commands::import::preview_import,
@@ -88,6 +91,7 @@ pub fn run() {
             commands::misc::app_paths,
             commands::misc::open_data_dir,
             commands::misc::version_info,
+            commands::diagnostics::diagnostics,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {

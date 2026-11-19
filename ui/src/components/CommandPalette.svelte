@@ -9,9 +9,8 @@
     Sun,
     SquareTerminal as TerminalSquareIcon,
   } from "@lucide/svelte";
-  import { api, type Connection, type Snippet } from "../ipc";
+  import { api, describeError, type Connection, type Snippet } from "../ipc";
   import { activeSessionId, activeView, connections, pushToast, sessions } from "../stores";
-  import { utf8ToBase64 } from "../terminalBus";
   import { fuzzyFilter } from "../fuzzy";
 
   let {
@@ -87,7 +86,7 @@
       id: "action-lock",
       label: "Lock vault",
       icon: Lock,
-      run: () => api.vaultLock().then(() => window.location.reload()),
+      run: () => window.dispatchEvent(new CustomEvent("gapura:lock")),
     },
   ];
 
@@ -113,8 +112,8 @@
     query.trim() ? fuzzyFilter(actions, (a) => a.label, query) : actions,
   );
 
-  // Snippets for the active session's connection; running one types it into
-  // the terminal and presses enter.
+  // Snippets for the active session's connection; running one asks the
+  // backend to expand placeholders and type it into the terminal.
   const activeSession = $derived($sessions.find((s) => s.id === $activeSessionId && s.state !== "closed") ?? null);
   let snippets = $state<Snippet[]>([]);
   $effect(() => {
@@ -144,6 +143,34 @@
   const snippetBase = $derived((quickConnectAction ? 1 : 0) + matchedConnections.length);
   const actionBase = $derived(snippetBase + matchedSnippets.length);
 
+  /** A snippet that asks for confirmation before it is typed. */
+  let pendingSnippet = $state<Snippet | null>(null);
+
+  async function sendSnippet(snippet: Snippet) {
+    const active = $sessions.find(
+      (s) => s.id === $activeSessionId && s.state !== "closed",
+    );
+    if (!active) {
+      pushToast("error", "Open a session first");
+      return;
+    }
+    try {
+      const result = await api.runSnippet(active.id, snippet.id);
+      pushToast("info", `Sent: ${snippet.name} — ${result.command}`);
+    } catch (e) {
+      pushToast("error", describeError(e));
+    }
+  }
+
+  function chooseSnippet(snippet: Snippet) {
+    if (snippet.require_confirm) {
+      pendingSnippet = snippet;
+      return;
+    }
+    void sendSnippet(snippet);
+    onClose();
+  }
+
   $effect(() => {
     if (selected >= flatResults.length) selected = Math.max(0, flatResults.length - 1);
   });
@@ -154,27 +181,35 @@
   }
 
   function runSelected() {
+    if (pendingSnippet) {
+      void sendSnippet(pendingSnippet);
+      pendingSnippet = null;
+      onClose();
+      return;
+    }
     const entry = flatResults[selected];
     if (!entry) return;
-    if (entry.type === "connection") onConnect(entry.value);
-    else if (entry.type === "snippet") {
-      const active = $sessions.find((s) => s.id === $activeSessionId);
-      if (active) {
-        void api.sessionWrite(active.id, utf8ToBase64(entry.value.command + "\n"));
-        pushToast("info", `Sent: ${entry.value.name}`);
-      }
+    if (entry.type === "connection") {
+      onConnect(entry.value);
       onClose();
-    } else void entry.value.run();
-    onClose();
+    } else if (entry.type === "snippet") {
+      chooseSnippet(entry.value);
+    } else {
+      void entry.value.run();
+      onClose();
+    }
   }
 
   function onKeydown(event: KeyboardEvent) {
     if (event.key === "Escape") {
-      onClose();
+      if (pendingSnippet) pendingSnippet = null;
+      else onClose();
     } else if (event.key === "ArrowDown") {
+      if (pendingSnippet) return;
       event.preventDefault();
       move(1);
     } else if (event.key === "ArrowUp") {
+      if (pendingSnippet) return;
       event.preventDefault();
       move(-1);
     } else if (event.key === "Enter") {
@@ -194,100 +229,125 @@
   }}
 >
   <div class="palette" role="dialog" aria-modal="true" aria-label="Command palette">
-    <div class="search">
-      <Search size={15} />
-      <input
-        bind:this={input}
-        bind:value={query}
-        placeholder="Connect to a server or run a command"
-        oninput={() => (selected = 0)}
-        spellcheck="false"
-      />
-      <span class="kbd">esc</span>
-    </div>
-
-    <div class="results">
-      {#if quickConnectAction}
-        <button
-          class="result"
-          class:selected={selected === 0}
-          onclick={() => {
-            void quickConnectAction.run();
-            onClose();
-          }}
-          onmousemove={() => (selected = 0)}
-        >
-          <span class="icon"><quickConnectAction.icon size={14} /></span>
-          <span class="label">{quickConnectAction.label}</span>
-        </button>
-      {/if}
-      {#if matchedConnections.length}
-        <p class="section">Connections</p>
-        {#each matchedConnections as connection, i (connection.id)}
-          {@const index = i}
+    {#if pendingSnippet}
+      <div class="confirm">
+        <p class="confirm-title">
+          Send this snippet{activeSession ? ` to ${activeSession.name}` : ""}?
+        </p>
+        <pre class="confirm-command mono">{pendingSnippet.command}</pre>
+        <p class="confirm-hint">
+          Placeholders are expanded from the connection.
+          {pendingSnippet.send_enter
+            ? "Enter is pressed after it."
+            : "It is typed without pressing Enter."}
+        </p>
+        <div class="confirm-actions">
+          <button class="btn ghost" onclick={() => (pendingSnippet = null)}>Cancel</button>
           <button
-            class="result"
-            class:selected={index === selected}
+            class="btn primary"
             onclick={() => {
-              onConnect(connection);
+              const snippet = pendingSnippet;
+              pendingSnippet = null;
+              if (snippet) void sendSnippet(snippet);
               onClose();
             }}
-            onmousemove={() => (selected = index)}
           >
-            <span class="dot" style={connection.color ? `background: ${connection.color}` : ""}></span>
-            <span class="label">{connection.name}</span>
-            <span class="meta mono">{connection.username}@{connection.host}</span>
+            Send
           </button>
-        {/each}
-      {/if}
+        </div>
+      </div>
+    {:else}
+      <div class="search">
+        <Search size={15} />
+        <input
+          bind:this={input}
+          bind:value={query}
+          placeholder="Connect to a server or run a command"
+          oninput={() => (selected = 0)}
+          spellcheck="false"
+        />
+        <span class="kbd">esc</span>
+      </div>
 
-      {#if matchedSnippets.length}
-        <p class="section">Snippets</p>
-        {#each matchedSnippets as snippet, k (snippet.id)}
-          {@const index = snippetBase + k}
+      <div class="results">
+        {#if quickConnectAction}
           <button
             class="result"
-            class:selected={index === selected}
+            class:selected={selected === 0}
             onclick={() => {
-              const active = $sessions.find((s) => s.id === $activeSessionId);
-              if (active) {
-                void api.sessionWrite(active.id, utf8ToBase64(snippet.command + "\n"));
-                pushToast("info", `Sent: ${snippet.name}`);
-              }
+              void quickConnectAction.run();
               onClose();
             }}
-            onmousemove={() => (selected = index)}
+            onmousemove={() => (selected = 0)}
           >
-            <span class="icon"><TerminalSquareIcon size={14} /></span>
-            <span class="label">{snippet.name}</span>
-            <span class="meta mono">{snippet.command}</span>
+            <span class="icon"><quickConnectAction.icon size={14} /></span>
+            <span class="label">{quickConnectAction.label}</span>
           </button>
-        {/each}
-      {/if}
+        {/if}
+        {#if matchedConnections.length}
+          <p class="section">Connections</p>
+          {#each matchedConnections as connection, i (connection.id)}
+            {@const index = (quickConnectAction ? 1 : 0) + i}
+            <button
+              class="result"
+              class:selected={index === selected}
+              onclick={() => {
+                onConnect(connection);
+                onClose();
+              }}
+              onmousemove={() => (selected = index)}
+            >
+              <span class="dot" style={connection.color ? `background: ${connection.color}` : ""}></span>
+              <span class="label">{connection.name}</span>
+              <span class="meta mono">{connection.username}@{connection.host}</span>
+            </button>
+          {/each}
+        {/if}
 
-      {#if matchedActions.length}
-        <p class="section">Actions</p>
-        {#each matchedActions as action, j (action.id)}
-          {@const index = actionBase + j}
-          <button
-            class="result"
-            class:selected={index === selected}
-            onclick={() => {
-              void action.run();
-              onClose();
-            }}
-            onmousemove={() => (selected = index)}
-          >
-            <span class="icon"><action.icon size={14} /></span>
-            <span class="label">{action.label}</span>
-          </button>
-        {/each}
-      {/if}
+        {#if matchedSnippets.length}
+          <p class="section">Snippets</p>
+          {#each matchedSnippets as snippet, k (snippet.id)}
+            {@const index = snippetBase + k}
+            <button
+              class="result"
+              class:selected={index === selected}
+              onclick={() => chooseSnippet(snippet)}
+              onmousemove={() => (selected = index)}
+            >
+              <span class="icon"><TerminalSquareIcon size={14} /></span>
+              <span class="label">{snippet.name}</span>
+              <span class="meta mono">{snippet.command}</span>
+              {#if snippet.require_confirm}
+                <span class="badge">confirm</span>
+              {/if}
+            </button>
+          {/each}
+        {/if}
+
+        {#if matchedActions.length}
+          <p class="section">Actions</p>
+          {#each matchedActions as action, j (action.id)}
+            {@const index = actionBase + j}
+            <button
+              class="result"
+              class:selected={index === selected}
+              onclick={() => {
+                void action.run();
+                onClose();
+              }}
+              onmousemove={() => (selected = index)}
+            >
+              <span class="icon"><action.icon size={14} /></span>
+              <span class="label">{action.label}</span>
+            </button>
+          {/each}
+        {/if}
 
       {#if flatResults.length === 0}
         <p class="none">Nothing matches "{query}".</p>
       {/if}
-    </div>
+      </div>
+    {/if}
   </div>
 </div>
 
@@ -392,5 +452,54 @@
   .none {
     color: var(--text-faint);
     padding: 14px;
+  }
+
+  .badge {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: var(--warning);
+    color: #21160a;
+    font-weight: 700;
+  }
+
+  .confirm {
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .confirm-title {
+    margin: 0;
+    font-weight: 600;
+  }
+
+  .confirm-command {
+    margin: 0;
+    padding: 10px 12px;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-size: 12px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    user-select: text;
+    max-height: 160px;
+    overflow-y: auto;
+  }
+
+  .confirm-hint {
+    margin: 0;
+    font-size: 11.5px;
+    color: var(--text-faint);
+  }
+
+  .confirm-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
   }
 </style>

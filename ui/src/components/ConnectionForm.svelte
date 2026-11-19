@@ -1,7 +1,7 @@
 <script lang="ts">
   import { Eye, EyeOff } from "@lucide/svelte";
   import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
-  import { api, type Connection, type SshCommandDraft } from "../ipc";
+  import { api, describeError, type Connection, type SshCommandDraft } from "../ipc";
   import { connections as connectionsStore } from "../stores";
   import { groups, pushToast } from "../stores";
   import Modal from "./Modal.svelte";
@@ -68,10 +68,47 @@
   let showPassword = $state(false);
   let newGroupName = $state("");
   let creatingGroup = $state(false);
+  let testing = $state(false);
+  let testResult = $state<{ ok: boolean; message: string } | null>(null);
 
   const isEdit = $derived(connection !== null);
 
   const otherConnections = $derived($connectionsStore.filter((c) => c.id !== connection?.id));
+
+  function authPayload() {
+    if (authKind === "agent") return { kind: "agent" } as const;
+    if (authKind === "password") {
+      return { kind: "password", data: { password: password || null } } as const;
+    }
+    return {
+      kind: "key_file",
+      data: { path: keyPath, passphrase: keyPassphrase || null },
+    } as const;
+  }
+
+  async function test() {
+    testResult = null;
+    testing = true;
+    try {
+      const result = await api.testConnection({
+        id: connection?.id ?? null,
+        host,
+        port: Number(port) || 22,
+        username,
+        auth: authPayload(),
+      });
+      testResult = {
+        ok: true,
+        message: `Connected · ${result.algorithm} · ${result.latency_ms} ms${
+          result.new_host_key ? " · new host key (pinned when you connect)" : ""
+        }`,
+      };
+    } catch (e) {
+      testResult = { ok: false, message: describeError(e) };
+    } finally {
+      testing = false;
+    }
+  }
 
   async function browseKey() {
     const picked = await openFileDialog({
@@ -100,18 +137,7 @@
     error = null;
     saving = true;
     try {
-      const auth = (() => {
-        if (authKind === "agent") return { kind: "agent" } as const;
-        if (authKind === "password")
-          return {
-            kind: "password",
-            data: { password: password || null },
-          } as const;
-        return {
-          kind: "key_file",
-          data: { path: keyPath, passphrase: keyPassphrase || null },
-        } as const;
-      })();
+      const auth = authPayload();
 
       const saved = await api.saveConnection({
         id: connection?.id ?? null,
@@ -277,8 +303,17 @@
     {/if}
 
     <footer>
+      <button type="button" class="btn" disabled={testing || saving} onclick={test}>
+        {testing ? "Testing..." : "Test connection"}
+      </button>
+      {#if testResult}
+        <span class="test-result" class:ok={testResult.ok} class:bad={!testResult.ok}>
+          {testResult.message}
+        </span>
+      {/if}
+      <span class="spacer"></span>
       <button type="button" class="btn ghost" onclick={onClose}>Cancel</button>
-      <button type="submit" class="btn primary" disabled={saving}>
+      <button type="submit" class="btn primary" disabled={saving || testing}>
         {saving ? "Saving..." : isEdit ? "Save changes" : "Create connection"}
       </button>
     </footer>
@@ -375,8 +410,28 @@
 
   footer {
     display: flex;
-    justify-content: flex-end;
+    align-items: center;
     gap: 8px;
     margin-top: 4px;
+    flex-wrap: wrap;
+  }
+
+  .spacer {
+    flex: 1;
+  }
+
+  .test-result {
+    font-size: 11.5px;
+    color: var(--text-muted);
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+
+  .test-result.ok {
+    color: var(--accent);
+  }
+
+  .test-result.bad {
+    color: var(--danger);
   }
 </style>

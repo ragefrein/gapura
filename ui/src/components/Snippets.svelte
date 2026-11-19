@@ -15,6 +15,8 @@
   let name = $state("");
   let command = $state("");
   let scope = $state<string | null>(null);
+  let requireConfirm = $state(false);
+  let sendEnter = $state(true);
   let busy = $state(false);
 
   async function refresh() {
@@ -36,10 +38,14 @@
         name,
         command,
         connection_id: scope,
+        require_confirm: requireConfirm,
+        send_enter: sendEnter,
       });
       name = "";
       command = "";
       scope = null;
+      requireConfirm = false;
+      sendEnter = true;
       await refresh();
     } catch (e) {
       pushToast("error", String((e as Error).message ?? e));
@@ -69,7 +75,9 @@
     <p class="hint">
       Snippets appear in Ctrl+K while a session is active; running one sends
       its command to the terminal. Global snippets are available everywhere;
-      scoped ones only for their connection.
+      scoped ones only for their connection. Use <span class="mono">{"{{host}}"}</span>,
+      <span class="mono">{"{{user}}"}</span>, <span class="mono">{"{{port}}"}</span> or
+      <span class="mono">{"{{name}}"}</span> to fill in the connection.
     </p>
 
     {#if snippets.length > 0}
@@ -79,7 +87,11 @@
             <div class="info">
               <span class="name">{snippet.name}</span>
               <span class="cmd mono">{snippet.command}</span>
-              <span class="scope">{connectionName(snippet.connection_id)}</span>
+              <span class="scope">
+                {connectionName(snippet.connection_id)}
+                {#if snippet.require_confirm}<span class="badge warn">confirm</span>{/if}
+                {#if !snippet.send_enter}<span class="badge">no enter</span>{/if}
+              </span>
             </div>
             <button class="icon-btn danger" title="Delete" onclick={() => remove(snippet)}>
               <Trash2 size={14} />
@@ -116,6 +128,16 @@
       <div class="field">
         <label for="s-command">Command</label>
         <input id="s-command" class="mono" bind:value={command} placeholder="sudo systemctl restart nginx" required spellcheck="false" />
+      </div>
+      <div class="checks">
+        <label class="check">
+          <input type="checkbox" bind:checked={requireConfirm} />
+          Ask before sending
+        </label>
+        <label class="check">
+          <input type="checkbox" bind:checked={sendEnter} />
+          Press Enter after it
+        </label>
       </div>
       <div class="actions">
         <button type="submit" class="btn primary" disabled={busy}>
@@ -185,6 +207,41 @@
   .scope {
     font-size: 11px;
     color: var(--text-faint);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .badge {
+    font-size: 9.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: var(--bg-hover);
+    color: var(--text-muted);
+    font-weight: 700;
+  }
+
+  .badge.warn {
+    background: var(--warning);
+    color: #21160a;
+  }
+
+  .checks {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+
+  .check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-muted);
+    cursor: pointer;
   }
 
   .editor {

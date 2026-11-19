@@ -12,14 +12,17 @@
     Trash2,
     Activity,
     ArrowRightLeft,
+    Star,
   } from "@lucide/svelte";
-  import type { Connection } from "../ipc";
+  import { api, describeError, type Connection } from "../ipc";
   import {
     connections,
     groups,
     activeView,
     hostStatuses,
     sessions,
+    settings,
+    pushToast,
     type SessionTab,
   } from "../stores";
   import { fuzzyFilter } from "../fuzzy";
@@ -57,14 +60,45 @@
     collapsed = next;
   }
 
+  /** Pinned first, then the user's chosen order (recent or name). */
+  function sortConnections(list: Connection[]): Connection[] {
+    const mode = $settings.connection_sort;
+    return [...list].sort((a, b) => {
+      if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+      if (mode === "name") return a.name.localeCompare(b.name);
+      const at = a.last_connected_at ? Date.parse(a.last_connected_at) : 0;
+      const bt = b.last_connected_at ? Date.parse(b.last_connected_at) : 0;
+      if (at !== bt) return bt - at;
+      return a.name.localeCompare(b.name);
+    });
+  }
+
   const visibleConnections = $derived(
     query.trim()
       ? fuzzyFilter($connections, (c) => `${c.name} ${c.host} ${c.username} ${c.tags.join(" ")}`, query)
-      : $connections,
+      : sortConnections($connections),
   );
 
   function connectionsOf(groupId: string | null): Connection[] {
     return visibleConnections.filter((c) => c.group_id === groupId);
+  }
+
+  async function togglePin(connection: Connection) {
+    try {
+      const updated = await api.setConnectionPinned(connection.id, !connection.pinned);
+      connections.update((list) => list.map((c) => (c.id === updated.id ? updated : c)));
+    } catch (e) {
+      pushToast("error", describeError(e));
+    }
+  }
+
+  async function setSort(mode: "recent" | "name") {
+    settings.update((s) => ({ ...s, connection_sort: mode }));
+    try {
+      await api.saveSettings($settings);
+    } catch (e) {
+      pushToast("error", describeError(e));
+    }
   }
 
   const visibleGroups = $derived(
@@ -106,6 +140,25 @@
         spellcheck="false"
       />
     </div>
+    {#if $connections.length > 0}
+      <div class="sort">
+        <span class="sort-label">Sort</span>
+        <button
+          class="sort-btn"
+          class:active={$settings.connection_sort === "recent"}
+          onclick={() => void setSort("recent")}
+        >
+          Recent
+        </button>
+        <button
+          class="sort-btn"
+          class:active={$settings.connection_sort === "name"}
+          onclick={() => void setSort("name")}
+        >
+          Name
+        </button>
+      </div>
+    {/if}
   </div>
 
   <nav class="list">
@@ -196,6 +249,9 @@
     <span class="name" title={`${connection.username}@${connection.host}:${connection.port}`}>
       {connection.name}
     </span>
+    {#if connection.pinned}
+      <Star size={11} class="pin-mark" aria-label="Pinned" />
+    {/if}
     {#if $hostStatuses[connection.id]}
       <span
         class="status-dot"
@@ -215,6 +271,16 @@
       ></span>
     {/if}
     <span class="actions">
+      <button
+        class="icon-btn"
+        title={connection.pinned ? "Unpin" : "Pin to top"}
+        onclick={(e) => {
+          e.stopPropagation();
+          void togglePin(connection);
+        }}
+      >
+        <Star size={13} class={connection.pinned ? "filled" : undefined} />
+      </button>
       <button
         class="icon-btn"
         title="Port forwards"
@@ -304,6 +370,45 @@
 
   .search input:focus-visible {
     outline: none;
+  }
+
+  .sort {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: var(--text-faint);
+  }
+
+  .sort-label {
+    margin-right: 2px;
+  }
+
+  .sort-btn {
+    padding: 2px 9px;
+    border-radius: 999px;
+    color: var(--text-faint);
+    font-size: 11px;
+  }
+
+  .sort-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text-muted);
+  }
+
+  .sort-btn.active {
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-weight: 600;
+  }
+
+  :global(.pin-mark) {
+    color: var(--accent);
+    flex: none;
+  }
+
+  :global(.filled) {
+    fill: currentColor;
   }
 
   .list {

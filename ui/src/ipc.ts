@@ -26,6 +26,9 @@ export interface Connection {
   color: string | null;
   jump_host_id: string | null;
   notes: string;
+  pinned: boolean;
+  last_connected_at: string | null;
+  connect_count: number;
   created_at: string;
   updated_at: string;
 }
@@ -51,6 +54,9 @@ export interface Settings {
   terminal_font_family: string;
   terminal_font_size: number;
   scrollback_lines: number;
+  /** 0 disables idle auto-lock. */
+  auto_lock_minutes: number;
+  connection_sort: "recent" | "name";
 }
 
 export interface KnownHostEntry {
@@ -132,7 +138,20 @@ export interface Snippet {
   name: string;
   command: string;
   connection_id: string | null;
+  require_confirm: boolean;
+  send_enter: boolean;
   created_at: string;
+}
+
+export interface TestConnectionResult {
+  fingerprint: string;
+  algorithm: string;
+  new_host_key: boolean;
+  latency_ms: number;
+}
+
+export interface DiagnosticsReport {
+  report: string;
 }
 
 export interface SshCommandDraft {
@@ -173,6 +192,13 @@ export function isIpcError(value: unknown): value is IpcError {
   );
 }
 
+/** Human-readable message for anything invoke() can reject with. */
+export function describeError(value: unknown): string {
+  if (isIpcError(value)) return value.message;
+  if (value instanceof Error) return value.message;
+  return String(value);
+}
+
 export const api = {
   vaultStatus: () => invoke<VaultStatus>("vault_status"),
   vaultSetup: (mode: "keychain" | "passphrase", passphrase?: string) =>
@@ -183,6 +209,8 @@ export const api = {
 
   listConnections: () => invoke<Connection[]>("list_connections"),
   saveConnection: (input: ConnectionInput) => invoke<Connection>("save_connection", { input }),
+  setConnectionPinned: (id: string, pinned: boolean) =>
+    invoke<Connection>("set_connection_pinned", { id, pinned }),
   deleteConnection: (id: string) => invoke<void>("delete_connection", { id }),
 
   listGroups: () => invoke<Group[]>("list_groups"),
@@ -191,6 +219,13 @@ export const api = {
 
   sessionOpen: (connectionId: string, cols: number, rows: number) =>
     invoke<SessionInfo>("session_open", { connectionId, cols, rows }),
+  testConnection: (input: {
+    id: string | null;
+    host: string;
+    port: number;
+    username: string;
+    auth: ConnectionInput["auth"];
+  }) => invoke<TestConnectionResult>("test_connection", { input }),
   sessionReconnect: (sessionId: string, cols: number, rows: number) =>
     invoke<SessionInfo>("session_reconnect", { sessionId, cols, rows }),
   sessionWrite: (sessionId: string, data: string) =>
@@ -232,17 +267,22 @@ export const api = {
     name: string;
     command: string;
     connection_id?: string | null;
+    require_confirm?: boolean;
+    send_enter?: boolean;
   }) => invoke<Snippet>("save_snippet", { input }),
   deleteSnippet: (id: string) => invoke<void>("delete_snippet", { id }),
+  runSnippet: (sessionId: string, snippetId: string) =>
+    invoke<{ command: string }>("run_snippet", { sessionId, snippetId }),
 
-  checkConnectionStatus: (ids: string[]) =>
-    invoke<ConnectionStatus[]>("check_connection_status", { ids }),
+  checkConnectionStatus: (ids: string[], force = false) =>
+    invoke<ConnectionStatus[]>("check_connection_status", { ids, force }),
   parseSshCommand: (text: string) =>
     invoke<SshCommandDraft>("parse_ssh_command_text", { text }),
 
   appPaths: () => invoke<AppPaths>("app_paths"),
   openDataDir: () => invoke<void>("open_data_dir"),
   versionInfo: () => invoke<{ version: string }>("version_info"),
+  diagnostics: () => invoke<DiagnosticsReport>("diagnostics"),
 };
 
 export { listen } from "@tauri-apps/api/event";

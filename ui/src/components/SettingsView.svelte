@@ -12,6 +12,8 @@
   let paths = $state<{ data_dir: string; config_dir: string } | null>(null);
   let confirmForget = $state<KnownHostEntry | null>(null);
   let localSettings: Settings = $state({ ...$settings });
+  let diagnostics = $state<string | null>(null);
+  let diagnosticsBusy = $state(false);
 
   async function refresh() {
     try {
@@ -51,6 +53,27 @@
       pushToast("info", `Forgot ${target.host_port}; it will be pinned again on the next connect`);
     } catch (e) {
       pushToast("error", String((e as Error).message ?? e));
+    }
+  }
+
+  async function generateDiagnostics() {
+    diagnosticsBusy = true;
+    try {
+      diagnostics = (await api.diagnostics()).report;
+    } catch (e) {
+      pushToast("error", String((e as Error).message ?? e));
+    } finally {
+      diagnosticsBusy = false;
+    }
+  }
+
+  async function copyDiagnostics() {
+    if (!diagnostics) return;
+    try {
+      await navigator.clipboard.writeText(diagnostics);
+      pushToast("info", "Diagnostics copied to the clipboard");
+    } catch {
+      pushToast("error", "Clipboard is not available");
     }
   }
 
@@ -128,6 +151,35 @@
 
   <div class="group">
     <div class="group-head">
+      <h3>Security</h3>
+    </div>
+    <div class="rows">
+      <div class="row">
+        <span class="label">Auto-lock after inactivity</span>
+        <div class="control small">
+          <input
+            type="number"
+            min="0"
+            max="1440"
+            step="1"
+            bind:value={localSettings.auto_lock_minutes}
+            title="Minutes (0 disables)"
+          />
+        </div>
+        <span class="hint">minutes · 0 disables</span>
+      </div>
+    </div>
+    <p class="hint">
+      Locking keeps live sessions and their scrollback; unlocking restores the
+      same tabs. The vault key is dropped from memory while locked.
+    </p>
+    <div class="actions">
+      <button class="btn primary" onclick={save}>Save</button>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="group-head">
       <h3>Pinned server fingerprints</h3>
       <button class="icon-btn" title="Refresh" onclick={refresh}>
         <RefreshCw size={14} />
@@ -189,6 +241,28 @@
         <p class="hint mono path-line">Vault: {paths.data_dir}</p>
       {/if}
     </div>
+  </div>
+
+  <div class="group">
+    <div class="group-head">
+      <h3>Diagnostics</h3>
+    </div>
+    <p class="hint">
+      A local report with versions, paths, counts and the active sessions.
+      Nothing is sent anywhere — it only exists once you generate it, and you
+      decide whether to copy it into a bug report. Secrets are never included.
+    </p>
+    <div class="diag-actions">
+      <button class="btn" disabled={diagnosticsBusy} onclick={generateDiagnostics}>
+        {diagnosticsBusy ? "Generating..." : "Generate report"}
+      </button>
+      {#if diagnostics}
+        <button class="btn" onclick={copyDiagnostics}>Copy to clipboard</button>
+      {/if}
+    </div>
+    {#if diagnostics}
+      <pre class="report mono">{diagnostics}</pre>
+    {/if}
   </div>
 </div>
 
@@ -325,6 +399,25 @@
 
   .path-line {
     word-break: break-all;
+    user-select: text;
+  }
+
+  .diag-actions {
+    display: flex;
+    gap: 8px;
+  }
+
+  .report {
+    margin: 10px 0 0;
+    padding: 12px 14px;
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-size: 11.5px;
+    line-height: 1.5;
+    max-height: 320px;
+    overflow: auto;
+    white-space: pre-wrap;
     user-select: text;
   }
 </style>

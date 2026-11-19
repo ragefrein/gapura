@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { Lock, KeyRound } from "@lucide/svelte";
   import { api } from "../ipc";
   import { vaultStatus } from "../stores";
@@ -6,6 +7,14 @@
   let passphrase = $state("");
   let busy = $state(false);
   let error = $state<string | null>(null);
+
+  onMount(() => {
+    // After a soft lock there is no recorded keychain error, so try the
+    // keychain immediately instead of making the user click Retry.
+    if ($vaultStatus.mode !== "passphrase" && !$vaultStatus.keychain_error) {
+      void retryKeychain();
+    }
+  });
 
   async function unlock() {
     error = null;
@@ -79,7 +88,9 @@
 
 <style>
   .unlock {
-    flex: 1;
+    position: fixed;
+    inset: 0;
+    z-index: 80;
     display: grid;
     place-items: center;
     background: var(--bg);

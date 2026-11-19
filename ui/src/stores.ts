@@ -18,6 +18,8 @@ export const settings = writable<Settings>({
   terminal_font_family: "JetBrains Mono",
   terminal_font_size: 14,
   scrollback_lines: 10_000,
+  auto_lock_minutes: 0,
+  connection_sort: "recent",
 });
 
 export type ViewName = "terminal" | "keys" | "settings";

@@ -63,7 +63,7 @@ pub fn save_connection(
         return Err(GapuraError::Other("name cannot be empty".into()));
     }
 
-    state.with_vault_mut(|vault| {
+    let saved = state.with_vault_mut(|vault| {
         let now = Utc::now();
         let existing_id = input.id;
 
@@ -125,6 +125,9 @@ pub fn save_connection(
             color: input.color,
             jump_host_id: input.jump_host_id,
             notes: input.notes,
+            pinned: false,
+            last_connected_at: None,
+            connect_count: 0,
             created_at: now,
             updated_at: now,
         };
@@ -135,12 +138,39 @@ pub fn save_connection(
             .iter_mut()
             .find(|c| c.id == connection.id)
         {
+            // Fields the form does not own survive an edit.
             connection.created_at = slot.created_at;
+            connection.pinned = slot.pinned;
+            connection.last_connected_at = slot.last_connected_at;
+            connection.connect_count = slot.connect_count;
             *slot = connection.clone();
         } else {
             vault.payload.connections.push(connection.clone());
         }
         Ok(connection)
+    })?;
+    // A changed host/port invalidates the cached reachability dot.
+    invalidate_status(&state, &saved.id);
+    Ok(saved)
+}
+
+/// Pin or unpin a connection (sidebar star). Pinned rows sort first.
+#[tauri::command]
+pub fn set_connection_pinned(
+    state: tauri::State<'_, AppState>,
+    id: Uuid,
+    pinned: bool,
+) -> CommandResult<Connection> {
+    state.with_vault_mut(|vault| {
+        let connection = vault
+            .payload
+            .connections
+            .iter_mut()
+            .find(|c| c.id == id)
+            .ok_or_else(|| GapuraError::Other("connection not found".into()))?;
+        connection.pinned = pinned;
+        connection.updated_at = Utc::now();
+        Ok(connection.clone())
     })
 }
 
@@ -158,7 +188,15 @@ pub fn delete_connection(state: tauri::State<'_, AppState>, id: Uuid) -> Command
             vault.payload.remove_secret_if_unused(secret_id);
         }
         Ok(())
-    })
+    })?;
+    invalidate_status(&state, &id);
+    Ok(())
+}
+
+fn invalidate_status(state: &tauri::State<'_, AppState>, id: &Uuid) {
+    if let Ok(mut cache) = state.status_cache.lock() {
+        cache.remove(id);
+    }
 }
 
 #[tauri::command]

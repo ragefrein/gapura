@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Instant;
 
 use std::collections::HashMap as StdHashMap;
 
@@ -28,6 +29,16 @@ pub struct AppState {
     pub keychain_error: Mutex<Option<String>>,
     /// Running port forwards, keyed by rule id.
     pub forwards: RwLock<StdHashMap<Uuid, ForwardRuntime>>,
+    /// Last reachability result per connection, so polling does not re-probe
+    /// every host on each UI refresh.
+    pub status_cache: Mutex<StdHashMap<Uuid, CachedStatus>>,
+}
+
+/// One cached TCP probe result.
+pub struct CachedStatus {
+    pub up: bool,
+    pub latency_ms: Option<u32>,
+    pub checked_at: Instant,
 }
 
 pub struct SessionEntry {
@@ -67,6 +78,7 @@ impl AppState {
             sessions: RwLock::new(HashMap::new()),
             keychain_error: Mutex::new(None),
             forwards: RwLock::new(StdHashMap::new()),
+            status_cache: Mutex::new(StdHashMap::new()),
         })
     }
 

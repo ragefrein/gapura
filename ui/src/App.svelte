@@ -54,11 +54,14 @@
   let bootstrapped = $state(false);
   let checking = $state(false);
 
-  /** Full-screen states: first-run wizard and the locked vault. */
+  // Idle tracking for auto-lock (not reactive: it changes on every input).
+  let lastActivity = Date.now();
+
+  /** Full-screen states: first-run wizard, then the app. The locked vault is
+   *  an overlay so terminal sessions and their scrollback survive a lock. */
   let stage = $derived.by(() => {
     if (!bootstrapped) return "boot";
     if (!$vaultStatus.exists) return "onboarding";
-    if (!$vaultStatus.unlocked) return "locked";
     return "main";
   });
 
@@ -76,17 +79,20 @@
     try {
       connections.set(await api.listConnections());
       groups.set(await api.listGroups());
-      await refreshStatus();
+      await refreshStatus(false);
     } catch (e) {
       pushToast("error", describe(e));
     }
   }
 
-  async function refreshStatus() {
+  async function refreshStatus(force = false) {
     if ($connections.length === 0) return;
     checking = true;
     try {
-      const results = await api.checkConnectionStatus($connections.map((c) => c.id));
+      const results = await api.checkConnectionStatus(
+        $connections.map((c) => c.id),
+        force,
+      );
       const next: Record<string, { up: boolean; latency_ms: number | null; checked_at: number }> = {};
       for (const r of results) {
         next[r.connection_id] = { up: r.up, latency_ms: r.latency_ms, checked_at: Date.now() };
@@ -113,7 +119,30 @@
 
   async function enterMain() {
     vaultStatus.set(await api.vaultStatus());
+    lastActivity = Date.now();
     if ($vaultStatus.unlocked) await refreshConnections();
+  }
+
+  /** Soft lock: close the vault but keep live sessions and their scrollback.
+   *  The unlock screen is an overlay, so nothing is torn down. */
+  async function lockVault() {
+    try {
+      await api.vaultLock();
+    } catch (e) {
+      pushToast("error", describe(e));
+      return;
+    }
+    vaultStatus.update((v) => ({ ...v, unlocked: false, keychain_error: null }));
+    lastActivity = Date.now();
+  }
+
+  function checkAutoLock() {
+    const minutes = $settings.auto_lock_minutes;
+    if (!minutes || !$vaultStatus.unlocked || stage !== "main") return;
+    if (Date.now() - lastActivity >= minutes * 60_000) {
+      void lockVault();
+      pushToast("info", "Vault locked after inactivity");
+    }
   }
 
   // ---- session lifecycle ---------------------------------------------------
@@ -267,16 +296,40 @@
       void closeSession((event as CustomEvent<string>).detail);
     const onUnlocked = () => void enterMain();
     const onOnboarded = () => void enterMain();
+    const onLock = () => void lockVault();
+    const onImport = () => (importOpen = true);
+    const onThemeSet = (event: Event) => {
+      const theme = (event as CustomEvent<Theme>).detail;
+      settings.update((s) => ({ ...s, theme }));
+      applyTheme(theme);
+    };
+    const noteActivity = () => {
+      lastActivity = Date.now();
+    };
     window.addEventListener("gapura:new-connection", onNew);
     window.addEventListener("gapura:toggle-theme", onToggleTheme);
     window.addEventListener("gapura:close-session", onCloseSession);
     window.addEventListener("gapura:unlocked", onUnlocked);
     window.addEventListener("gapura:onboarded", onOnboarded);
+    window.addEventListener("gapura:lock", onLock);
+    window.addEventListener("gapura:import", onImport);
+    window.addEventListener("gapura:theme-set", onThemeSet);
+    for (const type of ["pointerdown", "wheel", "touchstart"] as const) {
+      window.addEventListener(type, noteActivity, { passive: true });
+    }
+
+    const autoLockTimer = setInterval(checkAutoLock, 15_000);
+    const pollTimer = setInterval(() => {
+      if (document.visibilityState === "visible" && $vaultStatus.unlocked) {
+        void refreshStatus(false);
+      }
+    }, 60_000);
 
     const globalKeys = (event: KeyboardEvent) => {
+      lastActivity = Date.now();
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
-        if (stage === "main") paletteOpen = !paletteOpen;
+        if (stage === "main" && $vaultStatus.unlocked) paletteOpen = !paletteOpen;
       }
     };
     window.addEventListener("keydown", globalKeys);
@@ -317,6 +370,14 @@
       window.removeEventListener("gapura:close-session", onCloseSession);
       window.removeEventListener("gapura:unlocked", onUnlocked);
       window.removeEventListener("gapura:onboarded", onOnboarded);
+      window.removeEventListener("gapura:lock", onLock);
+      window.removeEventListener("gapura:import", onImport);
+      window.removeEventListener("gapura:theme-set", onThemeSet);
+      for (const type of ["pointerdown", "wheel", "touchstart"] as const) {
+        window.removeEventListener(type, noteActivity);
+      }
+      clearInterval(autoLockTimer);
+      clearInterval(pollTimer);
       window.removeEventListener("keydown", globalKeys);
     };
   });
@@ -326,10 +387,8 @@
   <div class="boot"></div>
 {:else if stage === "onboarding"}
   <Onboarding />
-{:else if stage === "locked"}
-  <UnlockScreen />
 {:else}
-  <div class="app">
+  <div class="app" inert={!$vaultStatus.unlocked}>
     <Sidebar
       onConnect={(connection) => {
         activeView.set("terminal");
@@ -339,12 +398,10 @@
       onDelete={(connection) => (confirmDelete = connection)}
       onNewConnection={() => (formTarget = { open: true, connection: null, prefill: null })}
       onImport={() => (importOpen = true)}
-      onCheckStatus={() => void refreshStatus()}
+      onCheckStatus={() => void refreshStatus(true)}
       onForwards={(connection) => (forwardsTarget = connection)}
       checking={checking}
-      onLock={() => {
-        void api.vaultLock().then(() => window.location.reload());
-      }}
+      onLock={() => void lockVault()}
     />
 
     <main>
@@ -377,6 +434,9 @@
       {/if}
     </main>
   </div>
+  {#if !$vaultStatus.unlocked}
+    <UnlockScreen />
+  {/if}
 {/if}
 
 {#if paletteOpen}

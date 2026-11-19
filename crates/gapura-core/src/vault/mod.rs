@@ -313,6 +313,9 @@ mod tests {
             color: None,
             jump_host_id: None,
             notes: String::new(),
+            pinned: false,
+            last_connected_at: None,
+            connect_count: 0,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         });

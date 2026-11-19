@@ -2,10 +2,12 @@
 
 use chrono::Utc;
 use gapura_core::model::Snippet;
+use gapura_core::ssh::session::SessionCommand;
 use gapura_core::GapuraError;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::commands::sessions::send_command;
 use crate::error::CommandResult;
 use crate::state::AppState;
 
@@ -15,6 +17,20 @@ pub struct SnippetInput {
     pub name: String,
     pub command: String,
     pub connection_id: Option<Uuid>,
+    #[serde(default)]
+    pub require_confirm: bool,
+    #[serde(default = "default_true")]
+    pub send_enter: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// The expanded command, echoed back so the UI can show what was sent.
+#[derive(Debug, Clone, Serialize)]
+pub struct RunSnippetResult {
+    pub command: String,
 }
 
 #[tauri::command]
@@ -27,7 +43,13 @@ pub fn list_snippets(
             .payload
             .snippets
             .iter()
-            .filter(|s| s.connection_id.is_none() || s.connection_id == connection_id)
+            // No connection filter means "manage view": show everything,
+            // global and per-connection. With a connection, show globals
+            // plus that connection's snippets.
+            .filter(|s| match connection_id {
+                None => true,
+                Some(id) => s.connection_id.is_none() || s.connection_id == Some(id),
+            })
             .cloned()
             .collect();
         snippets.sort_by_key(|a| a.name.to_lowercase());
@@ -58,6 +80,8 @@ pub fn save_snippet(
             snippet.name = name;
             snippet.command = input.command.trim().to_string();
             snippet.connection_id = input.connection_id;
+            snippet.require_confirm = input.require_confirm;
+            snippet.send_enter = input.send_enter;
             return Ok(snippet.clone());
         }
         let snippet = Snippet {
@@ -65,6 +89,8 @@ pub fn save_snippet(
             name,
             command: input.command.trim().to_string(),
             connection_id: input.connection_id,
+            require_confirm: input.require_confirm,
+            send_enter: input.send_enter,
             created_at: Utc::now(),
         };
         vault.payload.snippets.push(snippet.clone());
@@ -82,4 +108,58 @@ pub fn delete_snippet(state: tauri::State<'_, AppState>, id: Uuid) -> CommandRes
         }
         Ok(())
     })
+}
+
+/// Expand a snippet against the session's connection and type it into the
+/// terminal. Expansion and the trailing-enter decision live here so the UI
+/// does not need to duplicate the templating rules.
+#[tauri::command]
+pub async fn run_snippet(
+    state: tauri::State<'_, AppState>,
+    session_id: Uuid,
+    snippet_id: Uuid,
+) -> CommandResult<RunSnippetResult> {
+    let connection_id = {
+        let sessions = state
+            .sessions
+            .read()
+            .map_err(|_| GapuraError::Other("session lock poisoned".into()))?;
+        sessions
+            .get(&session_id)
+            .map(|entry| entry.connection_id)
+            .ok_or_else(|| GapuraError::Other("session not found".into()))?
+    };
+
+    let (snippet, connection) = state.with_vault(|vault| {
+        let snippet = vault
+            .payload
+            .snippets
+            .iter()
+            .find(|s| s.id == snippet_id)
+            .cloned()
+            .ok_or_else(|| GapuraError::Other("snippet not found".into()))?;
+        let connection = vault
+            .payload
+            .connection(connection_id)
+            .cloned()
+            .ok_or_else(|| GapuraError::Other("connection not found".into()))?;
+        Ok((snippet, connection))
+    })?;
+
+    if let Some(scope) = snippet.connection_id {
+        if scope != connection_id {
+            return Err(GapuraError::Other(
+                "this snippet belongs to another connection".into(),
+            ));
+        }
+    }
+
+    let command = gapura_core::snippet::expand_placeholders(&snippet.command, &connection);
+    let mut payload = command.clone().into_bytes();
+    if snippet.send_enter {
+        payload.push(b'\n');
+    }
+    send_command(&state, &session_id, SessionCommand::Write(payload)).await?;
+    tracing::info!(%session_id, %snippet_id, "snippet sent");
+    Ok(RunSnippetResult { command })
 }

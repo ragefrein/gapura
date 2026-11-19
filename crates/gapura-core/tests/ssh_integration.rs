@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use gapura_core::error::GapuraError;
 use gapura_core::model::AuthMethod;
-use gapura_core::ssh::backend::{connect, ConnectParams, ResolvedAuth};
+use gapura_core::ssh::backend::{connect, test_connect, ConnectParams, ResolvedAuth};
 use gapura_core::ssh::keys::generate_ed25519;
 use gapura_core::ssh::known_hosts::{KnownHostEntry, KnownHosts};
 use gapura_core::ssh::session::{start_session, SessionCommand, SessionEvent, SessionState};
@@ -454,6 +454,55 @@ async fn tofu_mismatch_blocks_and_carries_both_fingerprints() {
         }
         other => panic!("expected HostKeyMismatch, got {other:?}"),
     }
+    server.stop();
+}
+
+#[tokio::test]
+async fn test_connect_reports_without_pinning() {
+    let server = spawn_echo_server(None).await;
+    let (_tmp, dir) = temp_known_hosts_dir();
+    let known = Arc::new(Mutex::new(KnownHosts::load(&dir).unwrap()));
+
+    // The pre-save test handshakes and authenticates but must not record the
+    // first-use key: a typo'd host must not silently poison TOFU.
+    let outcome = test_connect(
+        ConnectParams {
+            host: server.addr.ip().to_string(),
+            port: server.addr.port(),
+            username: TEST_USER.into(),
+            auth: ResolvedAuth::Password {
+                password: TEST_PASSWORD.into(),
+            },
+        },
+        known.clone(),
+    )
+    .await
+    .expect("test connection must succeed");
+    assert!(outcome.new_host_key, "first sighting is reported");
+    assert_eq!(
+        outcome.fingerprint,
+        *server
+            .host_key
+            .public_key()
+            .fingerprint(HashAlg::Sha256)
+            .to_string()
+    );
+    assert!(
+        known.lock().unwrap().entries().is_empty(),
+        "the test must not pin the key"
+    );
+
+    // A real connect pins it as usual.
+    connect_to(
+        server.addr,
+        ResolvedAuth::Password {
+            password: TEST_PASSWORD.into(),
+        },
+        known.clone(),
+    )
+    .await
+    .expect("real connect must succeed");
+    assert_eq!(known.lock().unwrap().entries().len(), 1);
     server.stop();
 }
 

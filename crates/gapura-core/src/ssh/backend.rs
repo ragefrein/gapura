@@ -63,6 +63,17 @@ impl std::fmt::Debug for ConnectOutcome {
     }
 }
 
+impl ConnectOutcome {
+    /// Close the transport without opening a session. Used by the "test
+    /// connection" command, which only needs the handshake and auth result.
+    pub async fn close(self) -> Result<()> {
+        self.handle
+            .disconnect(russh::Disconnect::ByApplication, "", "en")
+            .await
+            .map_err(GapuraError::from)
+    }
+}
+
 /// Remote-forward registry: which server-side listener maps to which local
 /// target. Keyed by `bind_host:bind_port` (as the server reports it in
 /// forwarded-tcpip channel opens), valued by the local dial target.
@@ -83,6 +94,10 @@ pub struct ClientHandler {
     info: Arc<HandshakeInfo>,
     /// Targets for Remote forward rules (PRD F12).
     remote_forwards: RemoteForwardRegistry,
+    /// First-use fingerprints are pinned only for real connections. The
+    /// pre-save "test connection" flow sets this to false so a mistyped host
+    /// cannot silently poison the TOFU store.
+    record_new_hosts: bool,
 }
 
 impl client::Handler for ClientHandler {
@@ -163,17 +178,21 @@ impl client::Handler for ClientHandler {
             .map_err(|_| GapuraError::Other("known-hosts lock poisoned".into()))?;
         match known.check(&self.host, self.port, &fingerprint) {
             HostCheck::FirstUse => {
-                known
-                    .record(
-                        &self.host,
-                        self.port,
-                        fingerprint.clone(),
-                        algorithm.clone(),
-                    )
-                    .map_err(|e| GapuraError::Other(format!("cannot record host key: {e}")))?;
+                if self.record_new_hosts {
+                    known
+                        .record(
+                            &self.host,
+                            self.port,
+                            fingerprint.clone(),
+                            algorithm.clone(),
+                        )
+                        .map_err(|e| GapuraError::Other(format!("cannot record host key: {e}")))?;
+                    tracing::info!(host = %self.host, port = self.port, "host key pinned (first use)");
+                } else {
+                    tracing::info!(host = %self.host, port = self.port, "host key seen (test, not pinned)");
+                }
                 self.info.new_host_key.store(true, Ordering::SeqCst);
                 *self.info.key_info.lock().unwrap() = Some((fingerprint, algorithm));
-                tracing::info!(host = %self.host, port = self.port, "host key pinned (first use)");
                 Ok(true)
             }
             HostCheck::Match => {
@@ -247,6 +266,7 @@ async fn tunnel_to(
         known_hosts: Arc::clone(known_hosts),
         info: Arc::clone(&info),
         remote_forwards: remote_forwards.unwrap_or_default(),
+        record_new_hosts: true,
     };
     let config = russh_config();
     let channel = outcome
@@ -307,6 +327,25 @@ pub async fn connect(
     known_hosts: Arc<Mutex<KnownHosts>>,
     remote_forwards: RemoteForwardRegistry,
 ) -> Result<ConnectOutcome> {
+    connect_inner(params, known_hosts, remote_forwards, true).await
+}
+
+/// Handshake + authenticate without pinning a first-use host key. Used by the
+/// pre-save "test connection" command: it reports the fingerprint so the user
+/// can compare it, but a mistyped host cannot silently become trusted.
+pub async fn test_connect(
+    params: ConnectParams,
+    known_hosts: Arc<Mutex<KnownHosts>>,
+) -> Result<ConnectOutcome> {
+    connect_inner(params, known_hosts, Default::default(), false).await
+}
+
+async fn connect_inner(
+    params: ConnectParams,
+    known_hosts: Arc<Mutex<KnownHosts>>,
+    remote_forwards: RemoteForwardRegistry,
+    record_new_hosts: bool,
+) -> Result<ConnectOutcome> {
     let address = (params.host.as_str(), params.port);
     let info = Arc::new(HandshakeInfo::default());
     let handler = ClientHandler {
@@ -315,6 +354,7 @@ pub async fn connect(
         known_hosts: Arc::clone(&known_hosts),
         info: Arc::clone(&info),
         remote_forwards,
+        record_new_hosts,
     };
 
     let mut handle = match client::connect(russh_config(), address, handler).await {

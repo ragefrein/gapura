@@ -286,6 +286,9 @@ pub fn candidates_to_connections(candidates: &[ImportCandidate]) -> Vec<Connecti
             color: None,
             jump_host_id: None,
             notes: c.notes.clone(),
+            pinned: false,
+            last_connected_at: None,
+            connect_count: 0,
             created_at: now,
             updated_at: now,
         })

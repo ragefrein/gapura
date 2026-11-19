@@ -17,6 +17,7 @@ pub mod model;
 pub mod paths;
 pub mod quick_connect;
 pub mod settings;
+pub mod snippet;
 pub mod ssh;
 pub mod status;
 pub mod vault;

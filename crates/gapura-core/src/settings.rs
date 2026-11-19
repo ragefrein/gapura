@@ -17,6 +17,17 @@ pub enum Theme {
     Light,
 }
 
+/// How the connection list is ordered. Pinned connections always come first;
+/// this only decides the order within the pinned and unpinned groups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConnectionSort {
+    /// Most recently connected first, never-connected last.
+    Recent,
+    /// Alphabetical.
+    Name,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -24,6 +35,9 @@ pub struct Settings {
     pub terminal_font_family: String,
     pub terminal_font_size: u8,
     pub scrollback_lines: u32,
+    /// Lock the vault after this many minutes without input. 0 disables it.
+    pub auto_lock_minutes: u32,
+    pub connection_sort: ConnectionSort,
 }
 
 impl Default for Settings {
@@ -33,6 +47,8 @@ impl Default for Settings {
             terminal_font_family: "JetBrains Mono".to_string(),
             terminal_font_size: 14,
             scrollback_lines: 10_000,
+            auto_lock_minutes: 0,
+            connection_sort: ConnectionSort::Recent,
         }
     }
 }
@@ -81,6 +97,8 @@ mod tests {
             terminal_font_family: "Cascadia Code".into(),
             terminal_font_size: 16,
             scrollback_lines: 50_000,
+            auto_lock_minutes: 15,
+            connection_sort: ConnectionSort::Name,
         };
         save(dir, &custom).unwrap();
         assert_eq!(load(dir).unwrap(), custom);
